@@ -1,0 +1,22 @@
+[package]
+name = "arbor-cli"
+description = "Single command-line entry point for Arbor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "arbor"
+path = "src/main.rs"
+
+[dependencies]
+arbor-node = { path = "../arbor-node", version = "0.1.0" }
+clap.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

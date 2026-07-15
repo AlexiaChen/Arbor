@@ -1,5 +1,11 @@
 # Arbor Rust 实施规划
 
+## 当前状态（2026-07-15）
+
+- M0：进行中。ADR-001、002、005 已接受；协议常量、威胁模型、资源预算和兼容性政策已有初版；state 与共识共享 harness 已落地。ADR-003 仍等待增量 trie/pruning/crash benchmark 门禁，ADR-004 仍等待两个候选各自的 live 4-process 故障与 WAL 重启测试。
+- M1：完成。Rust 2024/stable workspace、17 个架构 crate、单一 `arbor` 入口、配置/错误分类/tracing/任务监督/graceful shutdown、`arbor-testkit` 与 CI 门禁已落地并通过本地 fmt、Clippy 和 workspace test。
+- M2 及以后：未开始；不得绕过 M0 的 Proposed ADR 硬门槛提前固化 trie/BFT 生产依赖。
+
 ## 1. 交付目标
 
 v1 交付一个可本地运行、可多节点验证、可创建树形逻辑子链并执行 EVM 合约的 Rust 区块链：

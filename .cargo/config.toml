@@ -1,0 +1,6 @@
+[build]
+rustflags = ["-Dunsafe-code"]
+
+[net]
+retry = 2
+

@@ -1,0 +1,15 @@
+[package]
+name = "arbor-state-commitment-spike"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+alloy-primitives = "1.3.0"
+alloy-trie = "0.9.5"
+rocksdb = { version = "0.24.0", default-features = false }
+tempfile = "3.20.0"
+thiserror = "2.0.12"
+

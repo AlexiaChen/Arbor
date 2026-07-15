@@ -1,0 +1,17 @@
+[package]
+name = "arbor-testkit"
+description = "Fault-aware test utilities for Arbor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true
+

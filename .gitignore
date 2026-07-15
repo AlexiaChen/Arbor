@@ -1,1 +1,7 @@
 /doc/requirement.md
+target/
+**/target/
+*.log
+.env
+.idea/
+.vscode/

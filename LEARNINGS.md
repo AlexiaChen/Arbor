@@ -61,3 +61,35 @@
 - **Evidence**: `doc/architecture.md` section 3; `doc/plan.md` M5-M8.
 - **Confidence**: 10/10
 - **Action**: Do not port `Extended`, `Piggyback`, or `Vacant` blocks. Keep domain-local state and block numbering, but route creation, staking, validator sets, and governance through the root domain.
+
+### L-008: [workflow] Keep M0 candidate dependencies outside the production workspace (2026-07-15)
+- **Issue**: M0 state and BFT risk spikes.
+- **Trigger**: alloy-trie, RocksDB, Malachite, hotstuff_rs, spike, Cargo dependency
+- **Pattern**: Candidate crates can compile and run without becoming an architectural commitment. Standalone Cargo workspaces under `spikes/` prevent their feature graphs and types from leaking into production crates before ADR hard gates pass.
+- **Evidence**: `spikes/state-commitment/Cargo.toml`, `spikes/consensus/Cargo.toml`, ADR-003, ADR-004.
+- **Confidence**: 10/10
+- **Action**: Do not add candidate trie or BFT crates to root `[workspace.dependencies]` until the corresponding ADR is Accepted.
+
+### L-009: [consensus] A shared quorum harness does not validate a third-party BFT engine (2026-07-15)
+- **Issue**: M0 durable signer and four-validator fixture.
+- **Trigger**: safety gate, four validators, WAL restart, double-sign, candidate passed
+- **Pattern**: The shared harness validates Arbor's intended adapter contract: fsync before signing, restart recovery, weighted quorum, validator update, and conflicting-vote refusal. It does not exercise Malachite or HotStuff message/round/WAL behavior by itself.
+- **Evidence**: `spikes/consensus`, ADR-004.
+- **Confidence**: 10/10
+- **Action**: Keep ADR-004 Proposed until both named candidates run the same live four-process offline/restart/fault scenarios; never report feature compilation as safety proof.
+
+### L-010: [toolchain] RocksDB bindgen needs a complete libclang include setup (2026-07-15)
+- **Issue**: Building the M0 state-commitment spike.
+- **Trigger**: librocksdb-sys, clang-sys, llvm-config, libclang, stdbool.h
+- **Pattern**: Having only a versioned `libclang-15.so.15` is insufficient for bindgen discovery, and without clang resource headers it may also miss `stdbool.h`. A development environment needs a normal libclang/clang installation, or explicit `LIBCLANG_PATH` plus the compiler include path in `BINDGEN_EXTRA_CLANG_ARGS`.
+- **Evidence**: `spikes/state-commitment/README.md` build notes.
+- **Confidence**: 9/10
+- **Action**: Ensure Linux CI images contain clang and libclang development headers before introducing RocksDB into the production workspace.
+
+### L-011: [testing] Restricted sandboxes can reject loopback port allocation (2026-07-15)
+- **Issue**: `arbor-testkit` random port validation.
+- **Trigger**: TcpListener, random port, PermissionDenied, sandbox
+- **Pattern**: A sandbox may reject `127.0.0.1:0` with `Operation not permitted` even though the helper is correct. Skipping on permission denial would hide actual platform failures.
+- **Evidence**: `crates/arbor-testkit`; workspace test passes outside the restricted socket sandbox.
+- **Confidence**: 10/10
+- **Action**: Preserve the bind assertion and rerun network/process tests with local-socket permission.
