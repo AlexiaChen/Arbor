@@ -22,13 +22,13 @@
 - **Confidence**: 10/10
 - **Action**: Do not add `mpvss-rs`, mining RPCs such as `getwork`/`submitwork`, or delegate/PVSS milestones. Put consensus work behind `arbor-consensus`.
 
-### L-003: [architecture] State storage is RocksDB, not FnFnCoreWallet LevelDB (2026-07-15)
-- **Issue**: Storage planning.
-- **Trigger**: storage, database, LevelDB, RocksDB, state, contract storage
-- **Pattern**: Arbor uses authenticated account/storage tries and a domain-head commitment, with trie nodes, code, receipts, indexes, WAL, and caches persisted in RocksDB column families. The old LevelDB wrappers and file layout are reference material only.
+### L-003: [architecture] State storage is parity-db, not FnFnCoreWallet LevelDB (updated 2026-07-16)
+- **Issue**: Storage planning initially selected RocksDB before comparing a blockchain-specific Rust store.
+- **Trigger**: storage, database, LevelDB, RocksDB, parity-db, state, contract storage
+- **Pattern**: Arbor uses authenticated account/storage tries and a domain-head commitment, with trie nodes, code, receipts, indexes, safety state, and caches persisted in parity-db columns. The old LevelDB wrappers and file layout are reference material only.
 - **Evidence**: `doc/architecture.md` section 6; `doc/plan.md` M3.
 - **Confidence**: 10/10
-- **Action**: Use RocksDB abstractions and temporary directories in tests. Do not reuse FnFnCoreWallet database wrappers or on-disk layout.
+- **Action**: Use parity-db abstractions and temporary directories in tests. Keep `sync_wal` and `sync_data` enabled for protocol commits; do not reuse FnFnCoreWallet database wrappers or on-disk layout.
 
 ### L-004: [convention] Architecture and plan must stay in sync (2026-07-15)
 - **Issue**: Documentation-first phase.
@@ -64,7 +64,7 @@
 
 ### L-008: [workflow] Keep M0 candidate dependencies outside the production workspace (2026-07-15)
 - **Issue**: M0 state and BFT risk spikes.
-- **Trigger**: alloy-trie, RocksDB, Malachite, hotstuff_rs, spike, Cargo dependency
+- **Trigger**: alloy-trie, parity-db, Malachite, hotstuff_rs, spike, Cargo dependency
 - **Pattern**: Candidate crates can compile and run without becoming an architectural commitment. Standalone Cargo workspaces under `spikes/` prevent their feature graphs and types from leaking into production crates before ADR hard gates pass.
 - **Evidence**: `spikes/state-commitment/Cargo.toml`, `spikes/consensus/Cargo.toml`, ADR-003, ADR-004.
 - **Confidence**: 10/10
@@ -76,15 +76,15 @@
 - **Pattern**: The shared harness validates Arbor's intended adapter contract: fsync before signing, restart recovery, weighted quorum, validator update, and conflicting-vote refusal. It does not exercise Malachite or HotStuff message/round/WAL behavior by itself.
 - **Evidence**: `spikes/consensus`, ADR-004.
 - **Confidence**: 10/10
-- **Action**: Keep ADR-004 Proposed until both named candidates run the same live four-process offline/restart/fault scenarios; never report feature compilation as safety proof.
+- **Action**: A candidate may be rejected immediately on a conclusive safety-ordering failure. Never report feature compilation or the shared model as candidate safety proof.
 
-### L-010: [toolchain] RocksDB bindgen needs a complete libclang include setup (2026-07-15)
+### L-010: [toolchain] RocksDB bindgen needs a complete libclang include setup (superseded 2026-07-16)
 - **Issue**: Building the M0 state-commitment spike.
 - **Trigger**: librocksdb-sys, clang-sys, llvm-config, libclang, stdbool.h
 - **Pattern**: Having only a versioned `libclang-15.so.15` is insufficient for bindgen discovery, and without clang resource headers it may also miss `stdbool.h`. A development environment needs a normal libclang/clang installation, or explicit `LIBCLANG_PATH` plus the compiler include path in `BINDGEN_EXTRA_CLANG_ARGS`.
-- **Evidence**: `spikes/state-commitment/README.md` build notes.
+- **Evidence**: Historical M0 RocksDB build attempt; ADR-003 now selects parity-db.
 - **Confidence**: 9/10
-- **Action**: Ensure Linux CI images contain clang and libclang development headers before introducing RocksDB into the production workspace.
+- **Action**: Historical note only. Do not reintroduce the bindgen/libclang burden unless a future ADR reverses ADR-003.
 
 ### L-011: [testing] Restricted sandboxes can reject loopback port allocation (2026-07-15)
 - **Issue**: `arbor-testkit` random port validation.
@@ -93,3 +93,19 @@
 - **Evidence**: `crates/arbor-testkit`; workspace test passes outside the restricted socket sandbox.
 - **Confidence**: 10/10
 - **Action**: Preserve the bind assertion and rerun network/process tests with local-socket permission.
+
+### L-012: [storage] Compare blockchain-native Rust stores before accepting a generic C++ engine (2026-07-16)
+- **Issue**: The RocksDB spike spent build time on C++ bindings even though parity-db directly targets fixed-size uniformly distributed trie keys, small values, batch block imports, columns, atomic transactions, and crash recovery.
+- **Trigger**: embedded KV, blockchain database, parity-db, RocksDB, bindgen, libclang
+- **Pattern**: Storage choice includes build reproducibility and operational surface, not only runtime throughput. A parity-db hash column maps to content-addressed trie nodes and a narrowly scoped B-tree column covers ordered metadata.
+- **Evidence**: The migrated M0 spike passed historical proof reopen, atomic transaction boundary, pruning, and a 100,000-account benchmark without libclang.
+- **Confidence**: 9/10
+- **Action**: Keep node hashes in a uniform hash-indexed column, ordered metadata in narrowly scoped B-tree columns, and measure durable recovery as well as submission latency.
+
+### L-013: [consensus] Logging a WAL failure is not a durable signing boundary (2026-07-16)
+- **Issue**: Malachite 0.7.0-pre flushes before publication but converts WAL/actor failures into logs and returns success; hotstuff_rs 0.4.0 sends a vote before updating persisted vote state.
+- **Trigger**: vote, signer, WAL, fsync, Malachite, hotstuff_rs, durable safety state
+- **Pattern**: Ordering diagrams are insufficient unless every persistence failure aborts signature release. Compile success and liveness tests cannot override a failed safety-ordering audit.
+- **Evidence**: ADR-004 rejects both unmodified candidates; the fallback model checks four-validator quorum intersection plus restart conflict refusal.
+- **Confidence**: 10/10
+- **Action**: Persist the exact vote intent before delegating to a signer, propagate every storage error, and keep M8 blocked until a real four-process suite passes.

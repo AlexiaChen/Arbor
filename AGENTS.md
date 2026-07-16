@@ -29,7 +29,7 @@ Do not weaken socket/process tests because a restricted agent sandbox rejects lo
 
 ## Architecture Constraints
 
-Follow the current design direction: EIP-2718/EVM account model, authenticated state persisted in RocksDB, and one root PoS/BFT consensus that finalizes all logical child-chain domains. Domain creation is a root-domain `ChainRegistry` call. Do not add MPVSS/PVSS, PoW/DPoS, FnFnCoreWallet Template types, per-domain consensus, or legacy block types. C++ behavior is semantic reference material, not a compatibility target.
+Follow the current design direction: EIP-2718/EVM account model, authenticated state persisted in parity-db, and one root PoS/BFT consensus that finalizes all logical child-chain domains. Domain creation is a root-domain `ChainRegistry` call. Do not add MPVSS/PVSS, PoW/DPoS, FnFnCoreWallet Template types, per-domain consensus, or legacy block types. C++ behavior is semantic reference material, not a compatibility target. Keep parity-db's synchronous WAL and data durability enabled for protocol commits; do not treat an in-memory commit overlay as durable completion.
 
 ADR status is a hard implementation boundary. `Proposed` ADR-003/004 spike results may guide experiments but cannot justify production trie or BFT dependencies. A shared safety harness is not evidence that a third-party engine passed live four-node recovery tests.
 

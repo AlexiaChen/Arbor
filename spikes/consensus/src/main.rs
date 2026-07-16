@@ -3,7 +3,7 @@
 #![forbid(unsafe_code)]
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -131,6 +131,59 @@ impl DummyApplication {
     }
 }
 
+/// Exhaustively checks the four-validator instance of the safety argument used
+/// by the fallback specification: two 2f+1 certificates must share an honest
+/// signer when at most f=1 validator is Byzantine.
+fn check_quorum_intersection_model() {
+    let validators = [0_u8, 1, 2, 3];
+    let quorums: Vec<BTreeSet<u8>> = (0_u8..16)
+        .filter(|mask| mask.count_ones() >= 3)
+        .map(|mask| {
+            validators
+                .into_iter()
+                .filter(|validator| mask & (1 << validator) != 0)
+                .collect()
+        })
+        .collect();
+
+    for byzantine in validators {
+        for left in &quorums {
+            for right in &quorums {
+                let intersection: Vec<_> = left.intersection(right).copied().collect();
+                assert!(
+                    intersection.iter().any(|validator| *validator != byzantine),
+                    "two certificates intersect only in the Byzantine validator"
+                );
+            }
+        }
+    }
+}
+
+fn check_crash_boundary_model(directory: &Path) -> Result<(), SpikeError> {
+    let path = directory.join("model.safety");
+    let first = Vote {
+        height: 11,
+        round: 4,
+        phase: 2,
+        block_hash: [0x33; 32],
+    };
+    let conflict = Vote {
+        block_hash: [0x44; 32],
+        ..first
+    };
+
+    // Crash before persistence releases no signature and leaves no safety state.
+    assert!(!path.exists());
+    // Every released signature follows the fsync+rename+parent-fsync boundary.
+    DurableSafetyStore::open(&path)?.persist_before_vote(first)?;
+    assert_eq!(DurableSafetyStore::open(&path)?.last_vote, Some(first));
+    assert!(matches!(
+        DurableSafetyStore::open(&path)?.persist_before_vote(conflict),
+        Err(SpikeError::Equivocation)
+    ));
+    Ok(())
+}
+
 fn main() -> Result<(), SpikeError> {
     let directory = tempdir()?;
     let path = directory.path().join("validator-0.safety");
@@ -163,7 +216,12 @@ fn main() -> Result<(), SpikeError> {
     assert_eq!(application.value, 1);
     assert!(application.can_commit(&[0, 1, 3]));
 
-    println!("consensus harness passed: 4 validators, one offline, update, WAL restart, no double-sign");
+    check_quorum_intersection_model();
+    check_crash_boundary_model(directory.path())?;
+
+    println!(
+        "consensus fallback model passed: four validators, validator update, one offline, durable restart, exhaustive quorum intersection"
+    );
     Ok(())
 }
 
@@ -178,4 +236,3 @@ enum SpikeError {
     #[error("malformed safety record length {0}")]
     MalformedSafetyRecord(usize),
 }
-

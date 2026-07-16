@@ -1,6 +1,6 @@
 [package]
 name = "arbor-storage"
-description = "RocksDB persistence boundaries for Arbor"
+description = "parity-db persistence boundaries for Arbor"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,4 +9,3 @@ repository.workspace = true
 
 [lints]
 workspace = true
-

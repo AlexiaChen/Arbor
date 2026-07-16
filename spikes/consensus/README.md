@@ -1,20 +1,19 @@
 # Consensus candidate spike
 
-This M0 directory holds the shared dummy application and durable signer harness
-used to evaluate both candidates. The default executable verifies the invariant
-that vote state reaches durable storage before signing, survives restart, and
-rejects a conflicting vote. It also checks the quorum boundary for four equal
-validators, one offline validator, and a validator-power update.
+This M0 standalone workspace contains the shared dummy application, durable
+signer boundary, and executable fallback safety model. It checks four-validator
+weighted quorum behavior, one offline validator, a validator-power update,
+crash/restart safety-state recovery, conflicting-vote rejection, and exhaustive
+certificate intersection with one possible Byzantine validator.
 
 ```bash
 cargo run --manifest-path spikes/consensus/Cargo.toml
-cargo check --manifest-path spikes/consensus/Cargo.toml --features malachite
-cargo check --manifest-path spikes/consensus/Cargo.toml --features hotstuff
+cargo check --manifest-path spikes/consensus/Cargo.toml --all-features
 ```
 
-The feature checks intentionally keep candidate dependencies outside the
-production workspace. They prove current dependency/toolchain compatibility,
-not a live engine run. ADR-004 remains `Proposed` until each adapter runs the
-same four-process fault/restart scenarios; the shared harness must not be cited
-as proof that either third-party engine passed that gate.
-
+The feature check proves that Malachite 0.7.0-pre and `hotstuff_rs` 0.4.0 compile
+on the pinned stable toolchain. ADR-004 rejects both unmodified engines because
+their persistence/signing ordering fails Arbor's hard gate. The executable is
+the required fallback model, not evidence that either engine passed a live
+four-process test. Production consensus remains blocked until ADR-004 is
+reopened under its stated conditions.

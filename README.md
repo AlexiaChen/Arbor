@@ -2,8 +2,9 @@
 
 Arbor is an early Rust implementation of an account-based, EVM-compatible
 blockchain in which one root PoS/BFT consensus finalizes batches for a tree of
-logical domains. The project is currently at the M0 protocol-spike and M1
-workspace-baseline stage; it is not a runnable blockchain yet.
+logical domains. M0 protocol decisions and the M1 workspace baseline are
+complete; M2 is next, and this is not a runnable blockchain yet. Production BFT
+work remains blocked by ADR-004's durable-signing gate.
 
 Read [the architecture](doc/architecture.md), [implementation plan](doc/plan.md),
 and [ADRs](doc/adr/README.md) before changing protocol boundaries.
