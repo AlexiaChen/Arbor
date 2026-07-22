@@ -5,7 +5,8 @@
 - M0：完成。ADR-001 至 005 均已形成接受决策；ADR-003 选择 Ethereum MPT + parity-db 并通过增量节点、历史 proof、裁剪、崩溃边界和 10 万账户基准；ADR-004 因两个候选均违反 pre-sign durable-state 门槛而拒绝其原生生产使用，并完成规定的最小安全规格与四验证者穷举模型。M8 保持阻塞，直到安全 adapter/候选版本通过真实四进程故障套件。
 - M1：完成并复验。Rust 2024/stable workspace、17 个架构 crate、单一 `arbor` 入口、配置/错误分类/tracing/任务监督/graceful shutdown、`arbor-testkit` 与 CI 门禁已落地；CLI smoke gate 覆盖 `node init`、`db inspect` 和 SIGTERM graceful shutdown，交互式 Ctrl-C 使用同一关闭路径。
 - M2：完成。强类型 protocol objects、显式 canonical codec、bounded EIP-1559 transaction/receipt RLP、Keccak/sender recovery、独立 secp256k1 consensus key、validator/QC 验证、30 个固定哈希向量和可执行 fuzz seeds 已落地；debug/release 与 Linux aarch64 CI 复核同一向量。
-- M3 及以后：未开始；M3 按 ADR-003 实现 trie/parity-db，M8 不得绕过 ADR-004 的重新接受条件固化 BFT 生产依赖。
+- M3：完成。Ethereum secure MPT 的标准 RLP node、account/storage/absence proof、256 层 domain-head sparse commitment、overlay、parity-db schema/identity/atomic marker、archive/full retention、flat cache 重建、snapshot manifest 和 `arbor db inspect` 已落地；子进程 kill 窗口只恢复旧 commit 或完整新 commit，10 万账户 release 基准已记录。
+- M4 及以后：未开始；M4 接入单 domain EVM 执行，M8 不得绕过 ADR-004 的重新接受条件固化 BFT 生产依赖。
 
 ## 1. 交付目标
 
@@ -133,6 +134,8 @@ bash scripts/check-m1-smoke.sh
 - flat cache 删除后能从 trie 重建，证明它不是状态真值。
 
 验收：`arbor db inspect` 可输出 schema、finalized marker 和 root 可达性检查；10 万账户基准记录吞吐、写放大和磁盘占用，但不先设虚假性能承诺。
+
+实现记录：[M3 production benchmark](benchmarks/2026-07-22-m3-state-storage.md)；固定 state/domain-head roots 见 `testdata/vectors/arbor-v1/state-roots.txt`。
 
 ### M4：单 domain EVM 状态转换
 

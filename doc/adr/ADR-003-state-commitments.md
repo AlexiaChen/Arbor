@@ -2,6 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-07-16
+- Updated: 2026-07-22 (M3 production implementation)
 
 ## Context
 
@@ -31,6 +32,15 @@ for blockchain trie workloads being available.
   Empty hashes and leaf/branch separation are fixed in
   [protocol constants](../protocol/constants.md).
 
+The fixed sparse-map encoding is:
+
+- present leaf: `keccak256("ARBOR_SMT_LEAF_V1" || 0x01 || key_hash || value_hash)`;
+- empty leaf: `keccak256("ARBOR_SMT_LEAF_V1" || 0x00)`;
+- branch at depth `d`: `keccak256("ARBOR_SMT_BRANCH_V1" || d_be_u16 || left || right)`.
+
+Empty hashes recurse from depth 256 to zero. Proofs contain exactly 256 sibling
+hashes ordered root-to-leaf.
+
 ## Spike evidence
 
 `spikes/state-commitment` produces stable MPT roots, persists content-addressed
@@ -47,11 +57,30 @@ value bytes, measured node-byte write amplification was 9.86x; temporary
 database disk use was 40,126,235 bytes. The fixed roots are recorded in the
 spike output and README command is reproducible.
 
-## Consequences and M3 boundary
+## M3 implementation evidence
 
-The spike accepts parity-db and the MPT commitment without introducing either
-dependency into the production workspace before M3. It removes RocksDB and its
-libclang build requirement from the architecture. M3 must add schema/version
-checks, subprocess kill injection during parity-db's commit pipeline, corrupt
-log/node tests, archive/full retention policy, and a traversal optimization;
-those are production hardening tasks, not reasons to reopen this M0 choice.
+Production `arbor-state` now materializes every standard Ethereum RLP MPT node,
+persists nodes by Keccak content hash, traverses persisted roots without a flat
+cache, and verifies generated inclusion/non-membership proofs through
+`alloy-trie`'s independent verifier. Fixed state/storage/domain-head vectors
+cross-check the commitment in debug, release, and the aarch64 CI job.
+
+Production `arbor-storage` uses application schema version 1, binds a database
+to network/genesis identity, keeps `sync_wal` and `sync_data` enabled, and
+submits trie nodes, reachability manifests, flat-cache changes, receipts,
+indexes, heads, and the finalized marker in one transaction. Tests cover reopen,
+schema mismatch, missing/corrupt nodes, malformed trailing logs, historical
+proofs, full retention, flat-cache reconstruction, and process kills at four
+commit timings. A durable commit is never reported as failed solely because
+best-effort post-commit pruning needs retry.
+
+The [2026-07-22 M3 production benchmark](../benchmarks/2026-07-22-m3-state-storage.md)
+records the current implementation without setting a performance promise.
+
+## Consequences
+
+M3 promotes exact-pinned `alloy-trie` and parity-db behind Arbor-owned state and
+storage boundaries. It removes RocksDB and its libclang build requirement from
+the architecture. Future schema changes require an explicit migration edge and
+old-database reopen/rollback exercise; a dependency upgrade must preserve the
+fixed vectors and crash behavior.

@@ -1,4 +1,4 @@
-# M2 protocol dependency record
+# M2-M3 protocol dependency record
 
 Consensus-sensitive dependencies are exact-pinned in the workspace manifest and
 locked in `Cargo.lock`.
@@ -8,15 +8,18 @@ locked in `Cargo.lock`.
 | `alloy-primitives` | 1.6.1 | crates.io / alloy-rs/core | MIT OR Apache-2.0 | `Address`, `B256`, `Bloom`, `Bytes`, `U256`, Keccak, EIP-1559 recovery; only `std`, `k256`, and `rlp` features |
 | `alloy-rlp` | 0.3.16 | crates.io / alloy-rs/core | MIT OR Apache-2.0 | Explicit Ethereum EIP-1559 transaction and receipt RLP |
 | `k256` | 0.13.4 | crates.io / RustCrypto/elliptic-curves | MIT OR Apache-2.0 | Deterministic low-s secp256k1 validator signatures; version aligned with `alloy-primitives` |
+| `alloy-trie` | 0.9.5 | crates.io / alloy-rs/trie | MIT OR Apache-2.0 | Independent Ethereum MPT root/proof verification and account semantics; only `ethereum` and `std` features |
+| `parity-db` | 0.5.5 | crates.io / paritytech/parity-db | MIT OR Apache-2.0 | Synchronous-WAL/data durable atomic storage for immutable trie nodes, manifests, roots, receipts, and indexes |
 
-M2 deliberately does not depend on `alloy-consensus`: Arbor owns its native
+Arbor deliberately does not depend on `alloy-consensus`: Arbor owns its native
 header/vote/QC types and limits, and importing that crate would also introduce
 unneeded Ethereum consensus and trie dependencies. BFT candidate crates remain
 outside the production workspace under ADR-004. rust-libp2p remains an M7
 dependency.
 
-Any upgrade must rerun the committed EIP-1559 cross-check, 30 canonical hash
-vectors, debug/release tests, Linux aarch64 vector job, Clippy, and `cargo deny`.
+Any upgrade must rerun the committed EIP-1559 cross-check, canonical and state
+root vectors, proof cross-checks, parity-db reopen/kill/pruning tests,
+debug/release tests, Linux aarch64 vector job, Clippy, and `cargo deny`.
 
 ## Tracked advisory exception
 

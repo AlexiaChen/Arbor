@@ -149,3 +149,27 @@
 - **Evidence**: `deny.toml`, `doc/protocol/dependencies.md`.
 - **Confidence**: 9/10
 - **Action**: Recheck every `alloy-primitives` upgrade and delete the exception immediately when the transitive `paste` dependency disappears.
+
+### L-019: [storage] A durable commit cannot become an error because later GC failed (2026-07-22)
+- **Issue**: M3 commit/retention boundary review.
+- **Trigger**: atomic commit, finalized marker, pruning, retry, durable success
+- **Pattern**: Once parity-db atomically publishes the new finalized marker, returning an error for a subsequent pruning failure can make the caller retry an already committed height. Protocol commit success and best-effort retention maintenance are separate outcomes.
+- **Evidence**: `arbor-storage::Database::commit`, ADR-003.
+- **Confidence**: 10/10
+- **Action**: Propagate every error before/during the protocol transaction, but report post-commit GC failure as deferred maintenance in `CommitStats`; never invite replay of a durable commit.
+
+### L-020: [storage] parity-db uniform columns are for exact hash-key boundaries (2026-07-22)
+- **Issue**: The first production flat-cache schema used a 64-byte `(domain_id, secure_key)` key in a uniform column and parity-db rejected the key layout.
+- **Trigger**: parity-db, uniform, B-tree, composite key, flat cache
+- **Pattern**: Keep the immutable trie-node and code columns on exact 32-byte uniform hashes. Composite/prefix-scanned keys belong in B-tree columns; schema configuration is part of the compatibility boundary.
+- **Evidence**: `arbor-storage::database_options`, M3 storage tests.
+- **Confidence**: 10/10
+- **Action**: Select columns from exact key shape and access pattern, then test create/reopen before treating the schema as accepted.
+
+### L-021: [state] Rebuild flat state from secure trie leaves, not address preimages (2026-07-22)
+- **Issue**: M3 flat-cache recovery design.
+- **Trigger**: secure MPT, flat cache, address, storage slot, rebuild
+- **Pattern**: Ethereum secure tries expose hashed keys, so raw address/slot preimages cannot be recovered by traversal. Arbor's rebuildable cache is keyed by `(domain_id, secure_key)`; address and slot lookups hash their preimages before querying it.
+- **Evidence**: `arbor-state::EthereumStateCommitment::collect_leaves`, `arbor-storage::rebuild_flat_state`.
+- **Confidence**: 10/10
+- **Action**: Treat `state_root + trie_nodes` as truth, rebuild only hashed-key caches from it, and keep any optional preimage/index data explicitly non-consensus.

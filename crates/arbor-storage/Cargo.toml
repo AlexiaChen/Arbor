@@ -7,5 +7,15 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[dependencies]
+alloy-primitives.workspace = true
+arbor-primitives = { path = "../arbor-primitives", version = "0.1.0" }
+arbor-state = { path = "../arbor-state", version = "0.1.0" }
+parity-db.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
 [lints]
 workspace = true

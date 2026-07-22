@@ -251,6 +251,8 @@ EVM revision、opcode/gas schedule、base fee 公式、block env 字段和 syste
 
 parity-db 是持久化引擎，不是状态根算法。Arbor 使用独立的 authenticated state commitment：v1 实现 Ethereum Merkle Patricia Trie（Keccak + RLP）承诺 domain account/storage，以获得最直接的 EVM proof 语义；M0 已验证 `alloy-trie` 的 root/proof 与增量内容节点写入，并使用 parity-db 的 hash/B-tree columns 保存 node store 和元数据。若未来改用 sparse Merkle tree 作为账户树，必须通过 ADR 明确承认其 `eth_getProof` 和 Ethereum state root 不兼容。`domain_heads_root` 使用独立、固定 key/value 编码的 sparse Merkle map，不改变 domain 内 Ethereum state root。
 
+M3 的 production MPT materializer 输出标准 Ethereum RLP leaf/extension/branch node，把每个 node 按 Keccak content hash 存储，并用 `alloy-trie` 独立复核 root/proof。secure account/storage key 的 preimage 不可从 trie 反推，因此可重建 flat cache 以 `(domain_id, secure_key)` 为键；地址/slot 查询先计算 secure key。`domain_heads_root` 的 present/empty leaf 与逐层 branch 编码由 ADR-003 固定，proof 必须恰有 256 个 root-to-leaf sibling。
+
 建议 column families：
 
 | CF | 内容 |
@@ -275,6 +277,8 @@ parity-db 是持久化引擎，不是状态根算法。Arbor 使用独立的 aut
 3. 收到 BFT commit 后，用一个开启 `sync_wal` 与 `sync_data` 的 parity-db transaction 原子写入 immutable trie nodes、block/receipt/index、commit marker 和 heads。
 4. 重启时以 commit marker 检测不完整提交，重放 consensus WAL，校验 head 对应 root 可达。
 5. consensus safety state 必须在签 vote 前 durable；不能等 block finalized 后才写入，否则崩溃重启可能双签。
+
+协议 commit 一旦 parity-db transaction 成功就必须向上层报告 durable success；随后 full-mode GC 失败只能标记为待重试，不能把已提交高度返回成失败并诱导调用方重复提交。
 
 存储模式：
 

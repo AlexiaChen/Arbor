@@ -15,7 +15,9 @@ init_output=$("$arbor_bin" node init --data-dir "$smoke_dir")
 
 inspect_output=$("$arbor_bin" db inspect --data-dir "$smoke_dir")
 [[ "$inspect_output" == *"config_version=1 moniker=arbor-node"* ]]
-[[ "$inspect_output" == *"database=not-initialized (storage is introduced in M3)"* ]]
+[[ "$inspect_output" == *"database_schema=1"* ]]
+[[ "$inspect_output" == *"finalized_marker=none"* ]]
+[[ "$inspect_output" == *"root_reachability=ok roots=0 unhealthy=0"* ]]
 
 if ! run_output=$(timeout --preserve-status --kill-after=5s --signal=TERM 1s \
   "$arbor_bin" node run --data-dir "$smoke_dir" 2>&1); then

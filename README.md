@@ -2,14 +2,14 @@
 
 Arbor is an early Rust implementation of an account-based, EVM-compatible
 blockchain in which one root PoS/BFT consensus finalizes batches for a tree of
-logical domains. M0 protocol decisions, the M1 workspace baseline, and M2
-protocol types/codecs/cryptography are complete; M3 state/storage is next, and
-this is not a runnable blockchain yet. Production BFT work remains blocked by
-ADR-004's durable-signing gate.
+logical domains. M0 protocol decisions, the M1 workspace baseline, M2 protocol
+types/codecs/cryptography, and M3 authenticated state/storage are complete; M4
+single-domain EVM execution is next, and this is not a runnable blockchain yet.
+Production BFT work remains blocked by ADR-004's durable-signing gate.
 
 Read [the architecture](doc/architecture.md), [implementation plan](doc/plan.md),
-and [ADRs](doc/adr/README.md) before changing protocol boundaries. M2's
-consensus-sensitive crates are recorded in
+and [ADRs](doc/adr/README.md) before changing protocol boundaries. M2/M3
+consensus- and state-sensitive crates are recorded in
 [protocol dependencies](doc/protocol/dependencies.md).
 
 ## Workspace checks
@@ -30,7 +30,8 @@ The single operator entry point is built as `arbor`:
 cargo run -p arbor-cli -- --help
 ```
 
-Node execution is only a supervised lifecycle placeholder in M1. The smoke gate
-checks configuration initialization, database inspection, and graceful SIGTERM
-shutdown. Storage, execution, networking, and consensus behavior arrive in
-later milestones. P2P uses rust-libp2p when network implementation starts in M7.
+Node execution is still a supervised lifecycle placeholder. The smoke gate
+checks configuration/database initialization, schema/marker/root inspection,
+and graceful SIGTERM shutdown. Authenticated state and durable storage exist,
+while execution, networking, and consensus behavior arrive in later milestones.
+P2P uses rust-libp2p when network implementation starts in M7.

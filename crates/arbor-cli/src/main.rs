@@ -9,6 +9,8 @@ use std::{
 };
 
 use arbor_node::{Config, Supervisor, init_tracing};
+use arbor_primitives::NetworkId;
+use arbor_storage::{Database, DatabaseIdentity, RetentionPolicy};
 use clap::{Parser, Subcommand};
 use thiserror::Error;
 
@@ -75,6 +77,8 @@ enum CliError {
     },
     #[error("{0}")]
     Supervisor(#[from] arbor_node::SupervisorError),
+    #[error("{0}")]
+    Storage(#[from] arbor_storage::StorageError),
 }
 
 #[tokio::main]
@@ -102,6 +106,7 @@ fn init(data_dir: &Path) -> Result<(), CliError> {
         path: path.clone(),
         source,
     })?;
+    open_database(data_dir)?;
     println!("initialized {}", path.display());
     Ok(())
 }
@@ -109,6 +114,7 @@ fn init(data_dir: &Path) -> Result<(), CliError> {
 async fn run(data_dir: PathBuf) -> Result<(), CliError> {
     init_tracing("info");
     let config = Config::load(data_dir.join("config.toml"))?;
+    open_database(&data_dir)?;
     tracing::info!(moniker = %config.node.moniker, "starting Arbor workspace baseline");
 
     let mut supervisor = Supervisor::new();
@@ -127,6 +133,36 @@ fn inspect(data_dir: &Path) -> Result<(), CliError> {
         "config_version={} moniker={}",
         config.version, config.node.moniker
     );
-    println!("database=not-initialized (storage is introduced in M3)");
+    let inspection = open_database(data_dir)?.inspect()?;
+    println!("database_schema={}", inspection.schema_version);
+    match inspection.finalized {
+        Some(marker) => println!(
+            "finalized_height={} consensus_hash={} domain_heads_root={}",
+            marker.height, marker.consensus_hash, marker.domain_heads_root
+        ),
+        None => println!("finalized_marker=none"),
+    }
+    let unhealthy = inspection
+        .roots
+        .iter()
+        .filter(|root| root.error.is_some())
+        .count();
+    println!(
+        "root_reachability={} roots={} unhealthy={}",
+        if unhealthy == 0 { "ok" } else { "corrupt" },
+        inspection.roots.len(),
+        unhealthy
+    );
     Ok(())
+}
+
+fn open_database(data_dir: &Path) -> Result<Database, arbor_storage::StorageError> {
+    Database::open(
+        data_dir.join("db"),
+        DatabaseIdentity {
+            network_id: NetworkId(alloy_primitives::keccak256(b"ARBOR_DEV_NETWORK_V1")),
+            genesis_hash: alloy_primitives::keccak256(b"ARBOR_DEV_GENESIS_V1"),
+        },
+        RetentionPolicy::Archive,
+    )
 }
