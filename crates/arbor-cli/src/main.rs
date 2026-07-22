@@ -8,9 +8,9 @@ use std::{
     time::Duration,
 };
 
-use arbor_node::{Config, Supervisor, init_tracing};
-use arbor_primitives::NetworkId;
-use arbor_storage::{Database, DatabaseIdentity, RetentionPolicy};
+use arbor_node::{
+    Config, Supervisor, init_tracing, initialize_dev_chain, open_database, run_dev_validator,
+};
 use clap::{Parser, Subcommand};
 use thiserror::Error;
 
@@ -42,12 +42,18 @@ enum NodeCommand {
         /// Directory that will contain config.toml and node data.
         #[arg(long)]
         data_dir: PathBuf,
+        /// Initialize the deterministic M5 development genesis.
+        #[arg(long)]
+        dev: bool,
     },
     /// Run the node assembly baseline until interrupted.
     Run {
         /// Directory initialized by `arbor node init`.
         #[arg(long)]
         data_dir: PathBuf,
+        /// Run immediate-finality single-validator development consensus.
+        #[arg(long)]
+        dev_validator: bool,
     },
 }
 
@@ -79,6 +85,10 @@ enum CliError {
     Supervisor(#[from] arbor_node::SupervisorError),
     #[error("{0}")]
     Storage(#[from] arbor_storage::StorageError),
+    #[error("{0}")]
+    DevNode(#[from] arbor_node::DevNodeError),
+    #[error("--dev-validator requires a data directory initialized with node init --dev")]
+    DevValidatorRequiresDevConfig,
 }
 
 #[tokio::main]
@@ -86,8 +96,11 @@ async fn main() -> Result<(), CliError> {
     let arguments = Arguments::parse();
     match arguments.command {
         Command::Node { command } => match command {
-            NodeCommand::Init { data_dir } => init(&data_dir),
-            NodeCommand::Run { data_dir } => run(data_dir).await,
+            NodeCommand::Init { data_dir, dev } => init(&data_dir, dev),
+            NodeCommand::Run {
+                data_dir,
+                dev_validator,
+            } => run(data_dir, dev_validator).await,
         },
         Command::Db { command } => match command {
             DbCommand::Inspect { data_dir } => inspect(&data_dir),
@@ -95,34 +108,52 @@ async fn main() -> Result<(), CliError> {
     }
 }
 
-fn init(data_dir: &Path) -> Result<(), CliError> {
+fn init(data_dir: &Path, dev: bool) -> Result<(), CliError> {
     fs::create_dir_all(data_dir).map_err(|source| CliError::Create {
         path: data_dir.to_owned(),
         source,
     })?;
     let path = data_dir.join("config.toml");
-    let config = Config::default().to_toml()?;
+    let mut config = Config::default();
+    config.node.dev = dev;
+    let config = config.to_toml()?;
     fs::write(&path, config).map_err(|source| CliError::Write {
         path: path.clone(),
         source,
     })?;
     open_database(data_dir)?;
+    if dev {
+        initialize_dev_chain(data_dir)?;
+    }
     println!("initialized {}", path.display());
     Ok(())
 }
 
-async fn run(data_dir: PathBuf) -> Result<(), CliError> {
+async fn run(data_dir: PathBuf, dev_validator: bool) -> Result<(), CliError> {
     init_tracing("info");
     let config = Config::load(data_dir.join("config.toml"))?;
     open_database(&data_dir)?;
-    tracing::info!(moniker = %config.node.moniker, "starting Arbor workspace baseline");
+    if dev_validator && !config.node.dev {
+        return Err(CliError::DevValidatorRequiresDevConfig);
+    }
+    tracing::info!(
+        moniker = %config.node.moniker,
+        dev_validator,
+        "starting Arbor workspace baseline"
+    );
 
     let mut supervisor = Supervisor::new();
     let mut shutdown = supervisor.shutdown_signal();
-    supervisor.spawn("node-placeholder", async move {
-        shutdown.cancelled().await;
-        Ok::<_, std::convert::Infallible>(())
-    });
+    if dev_validator {
+        supervisor.spawn("dev-validator", async move {
+            run_dev_validator(&data_dir, shutdown).await
+        });
+    } else {
+        supervisor.spawn("node-placeholder", async move {
+            shutdown.cancelled().await;
+            Ok::<_, std::convert::Infallible>(())
+        });
+    }
     supervisor.run(Duration::from_secs(10)).await?;
     Ok(())
 }
@@ -154,15 +185,4 @@ fn inspect(data_dir: &Path) -> Result<(), CliError> {
         unhealthy
     );
     Ok(())
-}
-
-fn open_database(data_dir: &Path) -> Result<Database, arbor_storage::StorageError> {
-    Database::open(
-        data_dir.join("db"),
-        DatabaseIdentity {
-            network_id: NetworkId(alloy_primitives::keccak256(b"ARBOR_DEV_NETWORK_V1")),
-            genesis_hash: alloy_primitives::keccak256(b"ARBOR_DEV_GENESIS_V1"),
-        },
-        RetentionPolicy::Archive,
-    )
 }

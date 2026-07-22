@@ -691,7 +691,15 @@ impl Database {
         Ok(deleted)
     }
 
-    fn latest_head(&self, domain_id: DomainId) -> Result<Option<(u64, B256)>, StorageError> {
+    /// Returns the latest consensus height and state root committed for a domain.
+    ///
+    /// Idle domains intentionally keep their previous domain head while root consensus height
+    /// advances, so this height can be lower than the global finalized marker.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if head metadata is malformed or cannot be read.
+    pub fn latest_head(&self, domain_id: DomainId) -> Result<Option<(u64, B256)>, StorageError> {
         self.db
             .get(COLUMN_META, &head_key(domain_id))?
             .map(|bytes| decode_head(&bytes))

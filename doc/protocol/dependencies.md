@@ -1,4 +1,4 @@
-# M2-M4 protocol dependency record
+# M2-M5 protocol dependency record
 
 Consensus-sensitive dependencies are exact-pinned in the workspace manifest and
 locked in `Cargo.lock`.
@@ -22,6 +22,12 @@ header/vote/QC types and limits, and importing that crate would also introduce
 unneeded Ethereum consensus and trie dependencies. BFT candidate crates remain
 outside the production workspace under ADR-004. rust-libp2p remains an M7
 dependency.
+
+M5 adds no third-party production dependency. `arbor-chain` composes the
+existing canonical codec, Keccak, executor, authenticated heads, and fixed EVM
+adapter; `arbor-consensus` is an internal development-only engine over the
+existing synchronous parity-db commit boundary. No rejected BFT candidate was
+added to the workspace.
 
 Any upgrade must rerun the committed EIP-1559 cross-check,
 canonical/state/execution root vectors, fixed Shanghai subset, proof

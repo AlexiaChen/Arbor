@@ -2,6 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-07-15
+- Updated: 2026-07-22 (M5 deterministic block validation and dev finality)
 
 ## Context
 
@@ -34,3 +35,6 @@ All domains share root security and finality. v1 validators also share the total
 execution cost, so this design does not claim unbounded execution scalability.
 Independent committees, sharding, or parent checkpointing require a future ADR.
 
+M5 implements this application boundary and fixed roots without selecting a
+production BFT engine. `SingleValidatorEngine` is explicit local development
+mode only and does not change the production safety assumptions above.

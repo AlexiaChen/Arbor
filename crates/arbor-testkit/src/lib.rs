@@ -70,6 +70,23 @@ impl ProcessGuard {
         };
         child.wait()
     }
+
+    /// Terminates a still-running child, waits for it, and disarms drop cleanup.
+    ///
+    /// If the child already exited, this only reaps and returns its status.
+    ///
+    /// # Errors
+    ///
+    /// Returns an IO error if status inspection, termination, or waiting fails.
+    pub fn kill_and_wait(mut self) -> Result<std::process::ExitStatus, std::io::Error> {
+        let Some(mut child) = self.child.take() else {
+            return Err(std::io::Error::other("process guard was already disarmed"));
+        };
+        if child.try_wait()?.is_none() {
+            child.kill()?;
+        }
+        child.wait()
+    }
 }
 
 impl Drop for ProcessGuard {

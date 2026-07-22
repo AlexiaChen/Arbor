@@ -197,3 +197,27 @@
 - **Evidence**: `arbor-executor::execute_batch`, `crates/arbor-executor/tests/m4_execution.rs`.
 - **Confidence**: 10/10
 - **Action**: Do not flatten both failure classes into one error or one rollback path; M5 block validation must preserve this distinction.
+
+### L-025: [consensus] Proposal execution is not finalized visibility (2026-07-22)
+- **Issue**: M5 proposal construction must execute transactions without letting RPC/state readers observe a block that may still be abandoned.
+- **Trigger**: proposal, overlay, finalized state, receipt, mempool reservation
+- **Pattern**: A validated proposal owns a private post-execution state and reserved mempool entries. Only a successful synchronous application commit may replace the finalized view or publish a commit event; abandonment restores entries without overwriting a newer same-nonce replacement.
+- **Evidence**: `arbor-chain::ValidatedProposal`, `arbor-consensus::SingleValidatorEngine`.
+- **Confidence**: 10/10
+- **Action**: Never point finalized queries at a proposal overlay or remove proposed transactions permanently before durable commit.
+
+### L-026: [storage] Global consensus height and a domain state-head height may differ (2026-07-22)
+- **Issue**: Continuous root consensus can commit an empty block while an idle domain must not create a vacant logical block.
+- **Trigger**: empty consensus block, idle domain, latest head, restart, state root
+- **Pattern**: The global finalized marker advances on every consensus commit, but a domain's persisted state/head height advances only when that domain has a batch. Recovery must compare each domain to its own last domain header consensus height, not require every state root at the global marker height.
+- **Evidence**: `Database::latest_head`, M5 empty-block smoke and recovery checks.
+- **Confidence**: 10/10
+- **Action**: Keep global marker and per-domain head semantics separate in storage, sync, pruning, and RPC.
+
+### L-027: [consensus] Immediate dev finality must fail closed in production mode (2026-07-22)
+- **Issue**: M5 needs a runnable single-validator chain while ADR-004 still rejects available BFT candidates.
+- **Trigger**: SingleValidatorEngine, dev-validator, production consensus, ADR-004
+- **Pattern**: The development engine validates and immediately commits locally, has no vote/QC or Byzantine claim, uses public fixture keys, and requires both dev-initialized config and an explicit CLI flag. Its production mode returns a typed hard failure.
+- **Evidence**: `arbor-consensus::EngineMode`, `arbor node run --dev-validator`, `scripts/check-m5-smoke.sh`.
+- **Confidence**: 10/10
+- **Action**: Do not reuse the dev engine as an M8 fallback or describe its restart/commit tests as BFT safety evidence.

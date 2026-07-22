@@ -26,6 +26,9 @@ pub struct Config {
 pub struct NodeConfig {
     /// Human-readable instance name.
     pub moniker: String,
+    /// Enables deterministic development genesis and permits `--dev-validator`.
+    #[serde(default)]
+    pub dev: bool,
 }
 
 /// Local network settings.
@@ -42,6 +45,7 @@ impl Default for Config {
             version: CONFIG_VERSION,
             node: NodeConfig {
                 moniker: "arbor-node".to_owned(),
+                dev: false,
             },
             network: NetworkConfig {
                 listen_addr: "127.0.0.1:0".parse().expect("literal address is valid"),

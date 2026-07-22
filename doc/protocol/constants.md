@@ -57,9 +57,16 @@ Domain-separation tags:
 - `ARBOR_VALIDATOR_SET_V1`
 - `ARBOR_BATCH_LEAF_V1`
 - `ARBOR_RESULT_LEAF_V1`
+- `ARBOR_MERKLE_EMPTY_V1`
+- `ARBOR_MERKLE_BRANCH_V1`
+- `ARBOR_MERKLE_ROOT_V1`
+- `ARBOR_PREVRANDAO_V1`
+- `ARBOR_CONSENSUS_BLOCK_BODY_V1`
 - `ARBOR_VOTE_V1`
 - `ARBOR_QC_V1`
 
-Economic constants such as creation deposit and staking/slashing values remain
+M5 has no inflationary block reward; the proposer receives only EIP-1559
+priority fees in each executed domain. Economic constants such as creation
+deposit and staking/slashing values remain
 unset until their state machines and economic review exist. Implementations
 must reject an absent production spec rather than silently choose local values.

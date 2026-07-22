@@ -270,6 +270,58 @@ impl Mempool {
         ready
     }
 
+    /// Returns senders with retained transactions for a domain in canonical address order.
+    #[must_use]
+    pub fn senders(&self, domain_id: DomainId) -> Vec<Address> {
+        self.sender_counts
+            .keys()
+            .filter_map(|(candidate_domain, sender)| {
+                (*candidate_domain == domain_id).then_some(*sender)
+            })
+            .collect()
+    }
+
+    /// Reserves exact transactions for a proposal by removing matching hashes from the pool.
+    ///
+    /// Missing hashes are ignored, allowing a caller to pass a bounded candidate list without a
+    /// second lookup. The returned entries retain canonical envelope/signature validation and can
+    /// be restored if the proposal is abandoned.
+    pub fn reserve_hashes(&mut self, hashes: &BTreeSet<B256>) -> Vec<PoolEntry> {
+        let keys: Vec<_> = self
+            .entries
+            .iter()
+            .filter_map(|(key, entry)| hashes.contains(&entry.transaction_hash).then_some(*key))
+            .collect();
+        let mut reserved = Vec::with_capacity(keys.len());
+        for key @ (domain_id, sender, _) in keys {
+            if let Some(entry) = self.entries.remove(&key) {
+                reserved.push(entry);
+                self.decrement_sender(domain_id, sender, 1);
+            }
+        }
+        reserved.sort_by_key(|entry| (entry.domain_id, entry.sender, entry.transaction.nonce));
+        reserved
+    }
+
+    /// Restores transactions from an abandoned proposal unless a same-nonce replacement exists.
+    ///
+    /// The entries were previously admitted and removed from this pool, so restoring them cannot
+    /// exceed the capacity they originally occupied. A replacement admitted while the proposal
+    /// was pending wins and is never overwritten.
+    pub fn restore_reserved(&mut self, entries: Vec<PoolEntry>) {
+        for entry in entries {
+            let key = (entry.domain_id, entry.sender, entry.transaction.nonce);
+            if self.entries.contains_key(&key) || !self.chain_ids.contains_key(&entry.domain_id) {
+                continue;
+            }
+            *self
+                .sender_counts
+                .entry((entry.domain_id, entry.sender))
+                .or_default() += 1;
+            self.entries.insert(key, entry);
+        }
+    }
+
     /// Removes finalized/stale nonces for one sender and returns the number removed.
     pub fn advance_nonce(
         &mut self,
@@ -285,12 +337,7 @@ impl Mempool {
         for key in &keys {
             self.entries.remove(key);
         }
-        if let Some(count) = self.sender_counts.get_mut(&(domain_id, sender)) {
-            *count -= keys.len();
-            if *count == 0 {
-                self.sender_counts.remove(&(domain_id, sender));
-            }
-        }
+        self.decrement_sender(domain_id, sender, keys.len());
         keys.len()
     }
 
@@ -314,6 +361,15 @@ impl Mempool {
         target: u64,
     ) -> bool {
         (state_nonce..=target).all(|nonce| self.entries.contains_key(&(domain_id, sender, nonce)))
+    }
+
+    fn decrement_sender(&mut self, domain_id: DomainId, sender: Address, removed: usize) {
+        if let Some(count) = self.sender_counts.get_mut(&(domain_id, sender)) {
+            *count = count.saturating_sub(removed);
+            if *count == 0 {
+                self.sender_counts.remove(&(domain_id, sender));
+            }
+        }
     }
 }
 
@@ -450,5 +506,19 @@ mod tests {
             pool.insert(domain(3), signed(3, 0, 1, 10), 0),
             Err(MempoolError::Capacity)
         );
+    }
+
+    #[test]
+    fn reserved_entries_can_be_restored_without_overwriting_replacements() {
+        let mut pool = Mempool::new(MempoolConfig::default());
+        pool.register_domain(domain(1), 1).unwrap();
+        let original = signed(1, 0, 10, 100);
+        let original_hash = eip1559_transaction_hash(&decode_eip1559(&original).unwrap()).unwrap();
+        pool.insert(domain(1), original, 0).unwrap();
+        let reserved = pool.reserve_hashes(&BTreeSet::from([original_hash]));
+        assert_eq!(reserved.len(), 1);
+        assert!(pool.is_empty());
+        pool.restore_reserved(reserved);
+        assert_eq!(pool.len(), 1);
     }
 }

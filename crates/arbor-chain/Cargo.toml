@@ -7,6 +7,18 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[dependencies]
+alloy-primitives.workspace = true
+arbor-codec = { path = "../arbor-codec", version = "0.1.0" }
+arbor-crypto = { path = "../arbor-crypto", version = "0.1.0" }
+arbor-evm = { path = "../arbor-evm", version = "0.1.0" }
+arbor-executor = { path = "../arbor-executor", version = "0.1.0" }
+arbor-primitives = { path = "../arbor-primitives", version = "0.1.0" }
+arbor-state = { path = "../arbor-state", version = "0.1.0" }
+thiserror.workspace = true
+
+[dev-dependencies]
+k256.workspace = true
+
 [lints]
 workspace = true
-

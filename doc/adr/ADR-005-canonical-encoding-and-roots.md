@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-07-15
-- Updated: 2026-07-22 (M2 codecs, vectors, and consensus key encoding)
+- Updated: 2026-07-22 (M2 codecs/signatures and M5 block collection roots)
 
 ## Decision
 
@@ -34,10 +34,12 @@ RPC-only fields do not enter the receipt root.
 Consensus batches are sorted by `domain_id`. Merkle collections use a
 domain-separated binary tree with explicit leaf count; odd nodes are paired
 with the level-specific empty hash rather than duplicated. Exact tags and
-limits are fixed in [protocol constants](../protocol/constants.md).
+limits are fixed in [protocol constants](../protocol/constants.md); the M5
+leaf/empty/branch/root preimages are fixed in the
+[block protocol](../protocol/blocks.md).
 
 ## Consequences
 
-M2 must add golden vectors and independent Ethereum cross-checks before these
-algorithms enter networking or storage. Generic Rust serialization formats are
-not consensus codecs.
+M2 added canonical object and Ethereum transaction/receipt vectors; M5 added
+block collection and full-replay root vectors before those bodies enter future
+networking. Generic Rust serialization formats are not consensus codecs.

@@ -4,13 +4,14 @@
 
 use alloy_primitives::{Signature, keccak256};
 use arbor_codec::{
-    CodecError, encode_consensus_header, encode_domain_genesis, encode_eip1559,
-    encode_eip1559_signing_payload, encode_quorum_certificate, encode_validator_set, encode_vote,
+    CodecError, encode_consensus_header, encode_domain_genesis, encode_domain_header,
+    encode_eip1559, encode_eip1559_signing_payload, encode_quorum_certificate,
+    encode_validator_set, encode_vote,
 };
 use arbor_primitives::{
     Address, B256, CANONICAL_CODEC_VERSION, ConsensusBlockHeader, ConsensusPublicKey,
-    ConsensusSignature, DomainGenesis, DomainId, Eip1559Transaction, NetworkId, QuorumCertificate,
-    ValidatorId, ValidatorSet, Vote,
+    ConsensusSignature, DomainBlockHeader, DomainGenesis, DomainId, Eip1559Transaction, NetworkId,
+    QuorumCertificate, ValidatorId, ValidatorSet, Vote,
 };
 use k256::ecdsa::{
     Signature as K256Signature, SigningKey, VerifyingKey,
@@ -79,6 +80,15 @@ pub fn derive_domain_id(
 /// Returns [`CryptoError::Codec`] if canonical encoding fails.
 pub fn consensus_header_hash(value: &ConsensusBlockHeader) -> Result<B256, CryptoError> {
     Ok(keccak256(encode_consensus_header(value)?))
+}
+
+/// Hashes a canonical domain-block header.
+///
+/// # Errors
+///
+/// Returns [`CryptoError::Codec`] if canonical encoding fails.
+pub fn domain_header_hash(value: &DomainBlockHeader) -> Result<B256, CryptoError> {
+    Ok(keccak256(encode_domain_header(value)?))
 }
 
 /// Hashes canonical immutable domain-genesis bytes.
