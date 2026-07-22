@@ -7,6 +7,8 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[dependencies]
+alloy-primitives.workspace = true
+
 [lints]
 workspace = true
-

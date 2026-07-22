@@ -7,6 +7,12 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[dependencies]
+alloy-primitives.workspace = true
+arbor-codec = { path = "../arbor-codec", version = "0.1.0" }
+arbor-primitives = { path = "../arbor-primitives", version = "0.1.0" }
+k256.workspace = true
+thiserror.workspace = true
+
 [lints]
 workspace = true
-

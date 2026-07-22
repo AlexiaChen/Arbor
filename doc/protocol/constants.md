@@ -33,11 +33,16 @@ Domain-separation tags:
 
 - `ARBOR_DOMAIN_V1`
 - `ARBOR_DOMAIN_GENESIS_V1`
+- `ARBOR_DOMAIN_DESCRIPTOR_V1`
+- `ARBOR_DOMAIN_HEADER_V1`
+- `ARBOR_DOMAIN_BATCH_V1`
 - `ARBOR_DOMAIN_HEAD_KEY_V1`
 - `ARBOR_DOMAIN_HEAD_VALUE_V1`
 - `ARBOR_SMT_LEAF_V1`
 - `ARBOR_SMT_BRANCH_V1`
 - `ARBOR_CONSENSUS_HEADER_V1`
+- `ARBOR_VALIDATOR_ID_V1`
+- `ARBOR_VALIDATOR_SET_V1`
 - `ARBOR_BATCH_LEAF_V1`
 - `ARBOR_RESULT_LEAF_V1`
 - `ARBOR_VOTE_V1`
@@ -46,4 +51,3 @@ Domain-separation tags:
 Economic constants such as creation deposit and staking/slashing values remain
 unset until their state machines and economic review exist. Implementations
 must reject an absent production spec rather than silently choose local values.
-

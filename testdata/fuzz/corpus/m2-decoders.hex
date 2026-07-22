@@ -1,0 +1,17 @@
+# Empty-like and one-byte discriminator seeds.
+00
+01
+02
+03
+ff
+
+# Empty and malformed typed RLP lists.
+02c0
+02c1
+02cd810180808080808080c0800101
+
+# Truncated and version-mutated Arbor domain tags.
+4152424f52
+4152424f525f564f54455f563101
+4152424f525f564f54455f563102
+4152424f525f434f4e53454e5355535f4845414445525f563101

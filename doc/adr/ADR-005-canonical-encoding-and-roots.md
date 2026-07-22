@@ -2,6 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-07-15
+- Updated: 2026-07-22 (M2 codecs, vectors, and consensus key encoding)
 
 ## Decision
 
@@ -16,6 +17,13 @@ over the resource budget.
 User transactions are standard EIP-2718 envelopes; v1 accepts EIP-1559 type 2.
 Signing payload, sender recovery, and transaction hash follow the Ethereum
 specification without an Arbor wrapper or second transaction ID.
+
+Validator consensus keys are separate secp256k1 keys encoded as 33-byte
+compressed SEC1 points. Consensus signatures are deterministic canonical low-s
+ECDSA `(r,s)` values encoded as exactly 64 bytes; validator IDs hash the
+compressed key with `ARBOR_VALIDATOR_ID_V1` and the canonical version byte.
+The recoverable parity used by Ethereum account transactions is not part of a
+consensus signature.
 
 Ethereum transaction and receipt tries use RLP(index) keys and Ethereum MPT
 root rules. The empty trie root is
@@ -33,4 +41,3 @@ limits are fixed in [protocol constants](../protocol/constants.md).
 M2 must add golden vectors and independent Ethereum cross-checks before these
 algorithms enter networking or storage. Generic Rust serialization formats are
 not consensus codecs.
-

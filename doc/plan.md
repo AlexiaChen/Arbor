@@ -4,7 +4,8 @@
 
 - M0：完成。ADR-001 至 005 均已形成接受决策；ADR-003 选择 Ethereum MPT + parity-db 并通过增量节点、历史 proof、裁剪、崩溃边界和 10 万账户基准；ADR-004 因两个候选均违反 pre-sign durable-state 门槛而拒绝其原生生产使用，并完成规定的最小安全规格与四验证者穷举模型。M8 保持阻塞，直到安全 adapter/候选版本通过真实四进程故障套件。
 - M1：完成并复验。Rust 2024/stable workspace、17 个架构 crate、单一 `arbor` 入口、配置/错误分类/tracing/任务监督/graceful shutdown、`arbor-testkit` 与 CI 门禁已落地；CLI smoke gate 覆盖 `node init`、`db inspect` 和 SIGTERM graceful shutdown，交互式 Ctrl-C 使用同一关闭路径。
-- M2 及以后：未开始；M3 按 ADR-003 实现 trie/parity-db，M8 不得绕过 ADR-004 的重新接受条件固化 BFT 生产依赖。
+- M2：完成。强类型 protocol objects、显式 canonical codec、bounded EIP-1559 transaction/receipt RLP、Keccak/sender recovery、独立 secp256k1 consensus key、validator/QC 验证、30 个固定哈希向量和可执行 fuzz seeds 已落地；debug/release 与 Linux aarch64 CI 复核同一向量。
+- M3 及以后：未开始；M3 按 ADR-003 实现 trie/parity-db，M8 不得绕过 ADR-004 的重新接受条件固化 BFT 生产依赖。
 
 ## 1. 交付目标
 
@@ -108,6 +109,8 @@ bash scripts/check-m1-smoke.sh
 - decoder fuzz seed corpus；任意输入不得 panic 或无界分配。
 
 验收：至少 30 个共识关键固定向量；同一向量在 debug/release 和 Linux x86_64/第二架构 CI runner 上字节一致。
+
+实现记录：M2 精确依赖、用途与升级门禁见 [protocol dependency record](protocol/dependencies.md)。
 
 ### M3：Authenticated state 与 parity-db
 

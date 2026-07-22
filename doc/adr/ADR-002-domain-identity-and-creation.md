@@ -2,6 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-07-15
+- Updated: 2026-07-22 (M2 canonical version byte made explicit)
 
 ## Decision
 
@@ -10,7 +11,8 @@ Domains are created only by an EIP-1559 transaction calling the root-domain
 
 ```text
 domain_id = keccak256(
-  "ARBOR_DOMAIN_V1" || network_id || parent_domain_id || create_tx_hash
+  "ARBOR_DOMAIN_V1" || canonical_codec_version ||
+  network_id || parent_domain_id || create_tx_hash
 )
 ```
 
@@ -34,4 +36,3 @@ finalizes and may receive transactions from the following consensus height.
 Every domain begins from empty state plus versioned system contracts and the
 owner allocation. Parent state is never copied. Cross-domain assets or calls
 require a separately reviewed protocol.
-

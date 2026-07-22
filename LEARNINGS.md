@@ -125,3 +125,27 @@
 - **Evidence**: `doc/architecture.md` section 8; `doc/plan.md` M7.
 - **Confidence**: 10/10
 - **Action**: Do not build a temporary custom TCP protocol or pull libp2p behavior into protocol primitives, state, or consensus crates.
+
+### L-016: [protocol] Ethereum receipts stay typed RLP; Arbor-native objects use explicit codecs (2026-07-22)
+- **Issue**: M2 initially risked treating receipt fields like an Arbor-native tagged object.
+- **Trigger**: receipt, EIP-2718, EIP-1559, RLP, canonical codec, receipt root
+- **Pattern**: EIP-1559 transactions and receipts must retain their standard `0x02 || rlp(payload)` bytes because those bytes feed Ethereum transaction/receipt tries. Arbor headers, domain descriptors, validator sets, votes, and QCs use separate tagged fixed-width canonical encodings.
+- **Evidence**: `crates/arbor-codec/src/ethereum.rs`, ADR-005, M2 cross-vector tests.
+- **Confidence**: 10/10
+- **Action**: Never wrap Ethereum envelopes or receipts in an Arbor tag before hashing or trie insertion.
+
+### L-017: [protocol] Hash immutable DomainGenesis, and bind every consensus signature to validator identity (2026-07-22)
+- **Issue**: M2 origin/signature boundary review.
+- **Trigger**: origin_hash, DomainGenesis, DomainDescriptor, ValidatorId, vote, QC, signature
+- **Pattern**: `origin_hash` hashes a separate immutable `DomainGenesis`; hashing a descriptor containing its own `origin_hash` would be circular. Consensus signing and verification must also require `vote.validator_id == hash(consensus_public_key)` and QC verification must check membership, every signature, and strictly greater than two-thirds power.
+- **Evidence**: `arbor-primitives::DomainGenesis`, `arbor-crypto`, `testdata/vectors/arbor-v1`.
+- **Confidence**: 10/10
+- **Action**: Keep mutable descriptor/status data out of the genesis preimage, and reject signer-ID mismatches before releasing or accepting votes.
+
+### L-018: [supply-chain] Scope maintenance advisory exceptions to one exact transitive crate (2026-07-22)
+- **Issue**: M2 `cargo deny` found RUSTSEC-2024-0436 through exact-pinned `alloy-primitives` 1.6.1 -> `paste` 1.0.15.
+- **Trigger**: cargo deny, advisory, unmaintained, paste, alloy-primitives
+- **Pattern**: This advisory reports that `paste` is archived, not a known vulnerability, and no safe upstream upgrade exists. A global relaxation would hide unrelated maintenance failures, so the repository records one exact advisory ID plus its removal condition.
+- **Evidence**: `deny.toml`, `doc/protocol/dependencies.md`.
+- **Confidence**: 9/10
+- **Action**: Recheck every `alloy-primitives` upgrade and delete the exception immediately when the transitive `paste` dependency disappears.

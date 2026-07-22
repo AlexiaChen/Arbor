@@ -27,6 +27,7 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo nextest run --workspace --all-features
+      - run: cargo test --release -p arbor-primitives -p arbor-codec -p arbor-crypto
       - run: cargo deny check
       - run: bash scripts/check-doc-links.sh
       - run: bash scripts/check-forbidden-deps.sh
