@@ -1,9 +1,9 @@
 # Arbor Rust 实施规划
 
-## 当前状态（2026-07-16）
+## 当前状态（2026-07-22）
 
 - M0：完成。ADR-001 至 005 均已形成接受决策；ADR-003 选择 Ethereum MPT + parity-db 并通过增量节点、历史 proof、裁剪、崩溃边界和 10 万账户基准；ADR-004 因两个候选均违反 pre-sign durable-state 门槛而拒绝其原生生产使用，并完成规定的最小安全规格与四验证者穷举模型。M8 保持阻塞，直到安全 adapter/候选版本通过真实四进程故障套件。
-- M1：完成。Rust 2024/stable workspace、17 个架构 crate、单一 `arbor` 入口、配置/错误分类/tracing/任务监督/graceful shutdown、`arbor-testkit` 与 CI 门禁已落地并通过本地 fmt、Clippy 和 workspace test。
+- M1：完成并复验。Rust 2024/stable workspace、17 个架构 crate、单一 `arbor` 入口、配置/错误分类/tracing/任务监督/graceful shutdown、`arbor-testkit` 与 CI 门禁已落地；CLI smoke gate 覆盖 `node init`、`db inspect` 和 SIGTERM graceful shutdown，交互式 Ctrl-C 使用同一关闭路径。
 - M2 及以后：未开始；M3 按 ADR-003 实现 trie/parity-db，M8 不得绕过 ADR-004 的重新接受条件固化 BFT 生产依赖。
 
 ## 1. 交付目标
@@ -86,9 +86,9 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo nextest run --workspace --all-features
 cargo deny check
+bash scripts/check-m1-smoke.sh
 ```
 
-CI 必须验证无默认启用的 MPVSS/PVSS、PoW、Template 或 LevelDB 依赖。
 
 ### M2：协议类型、编码与密码学
 

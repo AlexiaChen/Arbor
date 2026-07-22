@@ -109,3 +109,19 @@
 - **Evidence**: ADR-004 rejects both unmodified candidates; the fallback model checks four-validator quorum intersection plus restart conflict refusal.
 - **Confidence**: 10/10
 - **Action**: Persist the exact vote intent before delegating to a signer, propagate every storage error, and keep M8 blocked until a real four-process suite passes.
+
+### L-014: [workflow] The Rust workspace exists; verify it instead of treating Cargo as planned (2026-07-22)
+- **Issue**: M0/M1 completion review after the workspace baseline landed.
+- **Trigger**: workspace, Cargo.toml, M1, CI, current build commands
+- **Pattern**: L-005 describes the repository before M1 and is now obsolete. The root Cargo workspace, architecture crates, lockfile, CI, and executable quality gates exist; completion claims must be based on running them and the M1 CLI smoke path.
+- **Evidence**: `Cargo.toml`, `.github/workflows/ci.yml`, `scripts/check-m1-smoke.sh`.
+- **Confidence**: 10/10
+- **Action**: Run fmt, Clippy, nextest, deny, documentation/dependency checks, and the M1 smoke gate. Do not describe the repository as docs-only.
+
+### L-015: [network] Use rust-libp2p at the M7 network boundary (2026-07-22)
+- **Issue**: P2P implementation direction was reconfirmed while reviewing M0/M1.
+- **Trigger**: P2P, network, libp2p, temporary TCP, M1, M7
+- **Pattern**: Arbor should implement its first real P2P transport with rust-libp2p, keeping peer identity distinct from validator consensus identity. The dependency and protocol implementation belong to M7; M1 only reserves the `arbor-network` crate and local configuration boundary.
+- **Evidence**: `doc/architecture.md` section 8; `doc/plan.md` M7.
+- **Confidence**: 10/10
+- **Action**: Do not build a temporary custom TCP protocol or pull libp2p behavior into protocol primitives, state, or consensus crates.

@@ -15,6 +15,7 @@ and [ADRs](doc/adr/README.md) before changing protocol boundaries.
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
+bash scripts/check-m1-smoke.sh
 ```
 
 CI additionally runs `cargo nextest`, `cargo deny`, documentation-link checks,
@@ -26,5 +27,7 @@ The single operator entry point is built as `arbor`:
 cargo run -p arbor-cli -- --help
 ```
 
-Node execution is only a supervised lifecycle placeholder in M1. Storage,
-execution, networking, and consensus behavior arrive in later milestones.
+Node execution is only a supervised lifecycle placeholder in M1. The smoke gate
+checks configuration initialization, database inspection, and graceful SIGTERM
+shutdown. Storage, execution, networking, and consensus behavior arrive in
+later milestones. P2P uses rust-libp2p when network implementation starts in M7.

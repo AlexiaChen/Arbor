@@ -30,6 +30,7 @@ jobs:
       - run: cargo deny check
       - run: bash scripts/check-doc-links.sh
       - run: bash scripts/check-forbidden-deps.sh
+      - run: bash scripts/check-m1-smoke.sh
 
   canonical-vectors-aarch64:
     runs-on: ubuntu-24.04-arm

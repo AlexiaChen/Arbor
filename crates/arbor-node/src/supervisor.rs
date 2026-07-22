@@ -45,8 +45,8 @@ impl Supervisor {
             .spawn(async move { (name, task.await.map_err(Into::into)) });
     }
 
-    /// Waits for Ctrl-C or the first critical task exit, then asks remaining
-    /// tasks to stop and enforces the supplied grace period.
+    /// Waits for Ctrl-C, SIGTERM, or the first critical task exit, then asks
+    /// remaining tasks to stop and enforces the supplied grace period.
     ///
     /// # Errors
     ///
@@ -54,7 +54,7 @@ impl Supervisor {
     /// exits or panics, or shutdown exceeds the grace period.
     pub async fn run(mut self, grace: Duration) -> Result<(), SupervisorError> {
         let outcome = tokio::select! {
-            signal = tokio::signal::ctrl_c() => {
+            signal = shutdown_signal() => {
                 signal.map_err(SupervisorError::Signal)?;
                 Ok(())
             }
@@ -80,6 +80,22 @@ impl Supervisor {
         }
         outcome
     }
+}
+
+#[cfg(unix)]
+async fn shutdown_signal() -> Result<(), std::io::Error> {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut terminate = signal(SignalKind::terminate())?;
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => result,
+        _ = terminate.recv() => Ok(()),
+    }
+}
+
+#[cfg(not(unix))]
+async fn shutdown_signal() -> Result<(), std::io::Error> {
+    tokio::signal::ctrl_c().await
 }
 
 impl Default for Supervisor {
