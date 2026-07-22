@@ -1,5 +1,5 @@
 use alloy_primitives::{B256, U256};
-use alloy_rlp::{Encodable, Header};
+use alloy_rlp::{Decodable, Encodable, Header};
 use alloy_trie::{EMPTY_ROOT_HASH, KECCAK_EMPTY};
 
 use crate::mpt::{RlpKind, StateError, decode_rlp_list};
@@ -92,6 +92,24 @@ pub fn storage_trie_value(value: U256) -> Option<Vec<u8>> {
     }
 }
 
+/// Decodes one non-zero EVM storage word from its canonical trie RLP value.
+///
+/// # Errors
+///
+/// Returns [`StateError::MalformedRlp`] for a list, zero, non-minimal, or oversized value.
+pub fn decode_storage_trie_value(input: &[u8]) -> Result<U256, StateError> {
+    let mut remaining = input;
+    let value = U256::decode(&mut remaining)
+        .map_err(|_| StateError::MalformedRlp("storage value layout"))?;
+    if !remaining.is_empty() {
+        return Err(StateError::MalformedRlp("storage value trailing bytes"));
+    }
+    if value.is_zero() {
+        return Err(StateError::MalformedRlp("zero storage leaf"));
+    }
+    Ok(value)
+}
+
 fn reject_leading_zero(bytes: &[u8]) -> Result<(), StateError> {
     if bytes.first() == Some(&0) {
         return Err(StateError::MalformedRlp("non-minimal integer"));
@@ -146,5 +164,7 @@ mod tests {
         assert!(Account::default().is_empty());
         assert_eq!(storage_trie_value(U256::ZERO), None);
         assert_eq!(storage_trie_value(U256::from(1)), Some(vec![1]));
+        assert_eq!(decode_storage_trie_value(&[1]).unwrap(), U256::from(1));
+        assert!(decode_storage_trie_value(&[0x80]).is_err());
     }
 }

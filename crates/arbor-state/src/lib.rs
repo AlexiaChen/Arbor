@@ -8,7 +8,9 @@ mod mpt;
 mod overlay;
 mod snapshot;
 
-pub use account::{Account, decode_account, encode_account, storage_trie_value};
+pub use account::{
+    Account, decode_account, decode_storage_trie_value, encode_account, storage_trie_value,
+};
 pub use alloy_trie::{EMPTY_ROOT_HASH, KECCAK_EMPTY};
 pub use domain_heads::{DomainHead, DomainHeadProof, DomainHeadsCommitment};
 pub use mpt::{

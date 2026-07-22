@@ -1,0 +1,12 @@
+# Frozen minimal Shanghai adapter subset.
+# Semantics: EIP-3651, EIP-3855, EIP-3860 as listed by the Ethereum execution specs.
+# Source snapshot reviewed 2026-07-22:
+# https://github.com/ethereum/execution-specs (Shanghai fork manifest)
+# https://eips.ethereum.org/EIPS/eip-3855
+# https://eips.ethereum.org/EIPS/eip-3860
+evm_revision=Shanghai
+push0_runtime=0x5f5f5260205ff3
+push0_expected_output=0x0000000000000000000000000000000000000000000000000000000000000000
+max_initcode_bytes=49152
+oversized_initcode_bytes=49153
+intrinsic_nonzero_calldata_gas=16

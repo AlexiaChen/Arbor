@@ -29,6 +29,17 @@ future `ProtocolSpec`; local configuration cannot change them.
 | Max future timestamp step | 30 seconds |
 | Max active validators | 100 |
 
+Execution revision one:
+
+| Field | v1 value |
+| --- | --- |
+| EVM implementation | `revm = 41.0.0` |
+| EVM revision | Shanghai (`SpecId::SHANGHAI`) |
+| System address registry version | `1` |
+| Protocol-info address | `0x0000000000000000000000000000000000000800` |
+| Protocol-info selector | `0x93420cf4` (`protocolInfo()`) |
+| Protocol-info native gas | `500` |
+
 Domain-separation tags:
 
 - `ARBOR_DOMAIN_V1`

@@ -6,7 +6,8 @@
 - M1：完成并复验。Rust 2024/stable workspace、17 个架构 crate、单一 `arbor` 入口、配置/错误分类/tracing/任务监督/graceful shutdown、`arbor-testkit` 与 CI 门禁已落地；CLI smoke gate 覆盖 `node init`、`db inspect` 和 SIGTERM graceful shutdown，交互式 Ctrl-C 使用同一关闭路径。
 - M2：完成。强类型 protocol objects、显式 canonical codec、bounded EIP-1559 transaction/receipt RLP、Keccak/sender recovery、独立 secp256k1 consensus key、validator/QC 验证、30 个固定哈希向量和可执行 fuzz seeds 已落地；debug/release 与 Linux aarch64 CI 复核同一向量。
 - M3：完成。Ethereum secure MPT 的标准 RLP node、account/storage/absence proof、256 层 domain-head sparse commitment、overlay、parity-db schema/identity/atomic marker、archive/full retention、flat cache 重建、snapshot manifest 和 `arbor db inspect` 已落地；子进程 kill 窗口只恢复旧 commit 或完整新 commit，10 万账户 release 基准已记录。
-- M4 及以后：未开始；M4 接入单 domain EVM 执行，M8 不得绕过 ADR-004 的重新接受条件固化 BFT 生产依赖。
+- M4：完成。`revm` 41.0.0 精确锁定，protocol revision 1 固定 Shanghai；authenticated account/storage adapter、EIP-1559 batch、native protocol-info precompile、receipt/logs bloom/ordered trie roots、revert/OOG/fee/refund 语义、per-domain mempool 和 parity-db 重启向量已落地。
+- M5 及以后：未开始；下一步把 M4 执行结果接入单验证者 consensus/domain block，M8 不得绕过 ADR-004 的重新接受条件固化 BFT 生产依赖。
 
 ## 1. 交付目标
 
@@ -157,6 +158,8 @@ bash scripts/check-m1-smoke.sh
 - `revm` upgrade 前后跑完全相同的 fixture；root 漂移即失败。
 
 验收：从 genesis state 执行固定 block，重启后 state/receipt root 与黄金向量一致。
+
+实现记录：protocol revision 1 的 exact EVM/system/block-env 规则见 [execution protocol](protocol/execution.md)；固定 block root 见 `testdata/vectors/arbor-v1/execution-roots.txt`，Shanghai 子集见 `testdata/ethereum-tests/shanghai/arbor-subset.txt`。
 
 ### M5：共识块与单验证者开发链
 

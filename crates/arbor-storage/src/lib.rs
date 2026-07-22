@@ -9,7 +9,10 @@ use std::{
 
 use alloy_primitives::B256;
 use arbor_primitives::{DomainId, NetworkId};
-use arbor_state::{EthereumStateCommitment, NodeStore, SnapshotManifest, StateError, TrieSnapshot};
+use arbor_state::{
+    EMPTY_ROOT_HASH, EthereumStateCommitment, KECCAK_EMPTY, NodeStore, SnapshotManifest,
+    StateError, TrieSnapshot, decode_account,
+};
 use parity_db::{Db, Options};
 use thiserror::Error;
 
@@ -616,11 +619,11 @@ impl Database {
             }
             let domain_id = decode_domain_suffix(&key, PREFIX_HEAD)?;
             let (_, state_root) = decode_head(&value)?;
-            match EthereumStateCommitment::collect_leaves(state_root, self) {
-                Ok(leaves) => roots.push(RootHealth {
+            match self.validate_execution_root(state_root) {
+                Ok(leaf_count) => roots.push(RootHealth {
                     domain_id,
                     state_root,
-                    leaves: Some(leaves.len()),
+                    leaves: Some(leaf_count),
                     error: None,
                 }),
                 Err(error) => roots.push(RootHealth {
@@ -637,6 +640,23 @@ impl Database {
             finalized: self.finalized_marker()?,
             roots,
         })
+    }
+
+    fn validate_execution_root(&self, state_root: B256) -> Result<usize, StorageError> {
+        let leaves = EthereumStateCommitment::collect_leaves(state_root, self)?;
+        for encoded in leaves.values() {
+            let account = decode_account(encoded)?;
+            if account.storage_root != EMPTY_ROOT_HASH {
+                EthereumStateCommitment::collect_leaves(account.storage_root, self)?;
+            }
+            if account.code_hash != KECCAK_EMPTY {
+                self.contract_code(account.code_hash)?
+                    .ok_or(StorageError::CorruptMetadata(
+                        "missing current contract code",
+                    ))?;
+            }
+        }
+        Ok(leaves.len())
     }
 
     /// Prunes one non-current historical root and content nodes unreachable from all manifests.
@@ -1061,8 +1081,11 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use alloy_primitives::keccak256;
-    use arbor_state::EthereumStateCommitment;
+    use alloy_primitives::{U256, address, keccak256};
+    use arbor_state::{
+        Account, EthereumStateCommitment, encode_account, secure_account_key, secure_storage_key,
+        storage_trie_value,
+    };
     use tempfile::tempdir;
 
     use super::*;
@@ -1136,7 +1159,34 @@ mod tests {
         assert_eq!(db.flat_state(domain(), key).unwrap(), None);
         assert_eq!(db.rebuild_flat_state(domain(), second.root()).unwrap(), 2);
         assert_eq!(db.flat_state(domain(), key).unwrap(), Some(vec![11]));
+    }
+
+    #[test]
+    fn inspection_descends_into_current_account_storage_tries() {
+        let dir = tempdir().unwrap();
+        let storage = EthereumStateCommitment::build(&BTreeMap::from([(
+            secure_storage_key(U256::from(7)),
+            storage_trie_value(U256::from(9)).unwrap(),
+        )]))
+        .unwrap();
+        let account = Account {
+            balance: U256::from(1),
+            storage_root: storage.root(),
+            ..Account::default()
+        };
+        let mut state = EthereumStateCommitment::build(&BTreeMap::from([(
+            secure_account_key(address!("0000000000000000000000000000000000000001")),
+            encode_account(&account),
+        )]))
+        .unwrap();
+        state.extend_nodes(storage.nodes().clone()).unwrap();
+        let db = Database::open(dir.path(), identity(), RetentionPolicy::Archive).unwrap();
+        db.commit(commit(1, state)).unwrap();
         assert!(db.inspect().unwrap().roots[0].error.is_none());
+        db.db
+            .commit([(COLUMN_TRIE_NODES, storage.root().to_vec(), None)])
+            .unwrap();
+        assert!(db.inspect().unwrap().roots[0].error.is_some());
     }
 
     #[test]

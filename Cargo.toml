@@ -17,6 +17,7 @@ alloy-trie = { version = "=0.9.5", default-features = false, features = ["ethere
 clap = { version = "4.5.41", features = ["derive"] }
 k256 = { version = "=0.13.4", default-features = false, features = ["ecdsa", "std"] }
 parity-db = "=0.5.5"
+revm = { version = "=41.0.0", default-features = false, features = ["std", "portable", "secp256k1"] }
 serde = { version = "1.0.219", features = ["derive"] }
 tempfile = "3.20.0"
 thiserror = "2.0.12"

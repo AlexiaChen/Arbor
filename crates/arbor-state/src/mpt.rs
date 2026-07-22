@@ -107,6 +107,39 @@ impl TrieSnapshot {
         &self.leaves
     }
 
+    /// Adds independently rooted content-addressed nodes required by values in this trie.
+    ///
+    /// Account snapshots use this to carry contract-storage trie nodes through the same
+    /// durable commit and retention manifest. The account root and flat account leaves do
+    /// not change.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StateError::NodeHashMismatch`] if a node is not keyed by its Keccak hash,
+    /// or [`StateError::Proof`] if the same hash is paired with different bytes.
+    pub fn extend_nodes(
+        &mut self,
+        nodes: impl IntoIterator<Item = (B256, Vec<u8>)>,
+    ) -> Result<(), StateError> {
+        for (hash, bytes) in nodes {
+            if keccak256(&bytes) != hash {
+                return Err(StateError::NodeHashMismatch {
+                    expected: hash,
+                    actual: keccak256(&bytes),
+                });
+            }
+            if self
+                .nodes
+                .get(&hash)
+                .is_some_and(|existing| *existing != bytes)
+            {
+                return Err(StateError::Proof("content hash collision".to_owned()));
+            }
+            self.nodes.insert(hash, bytes);
+        }
+        Ok(())
+    }
+
     /// Creates an independently verifiable inclusion or exclusion proof.
     ///
     /// # Errors

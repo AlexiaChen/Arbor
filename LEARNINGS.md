@@ -173,3 +173,27 @@
 - **Evidence**: `arbor-state::EthereumStateCommitment::collect_leaves`, `arbor-storage::rebuild_flat_state`.
 - **Confidence**: 10/10
 - **Action**: Treat `state_root + trie_nodes` as truth, rebuild only hashed-key caches from it, and keep any optional preimage/index data explicitly non-consensus.
+
+### L-022: [evm] Protocol revisions must name an EVM fork, never a dependency default (2026-07-22)
+- **Issue**: M4 `revm` integration exposed that `SpecId::default()` advances when the crate learns a newer hardfork.
+- **Trigger**: revm, ProtocolSpec, EVM revision, hardfork, upgrade
+- **Pattern**: Dependency version and consensus EVM revision are separate compatibility boundaries. Arbor protocol revision 1 explicitly selects Shanghai under exact-pinned `revm` 41.0.0; upgrading the crate must run the same fixtures without moving that mapping.
+- **Evidence**: `arbor-evm::ProtocolSpec`, `doc/protocol/execution.md`, M4 execution roots.
+- **Confidence**: 10/10
+- **Action**: Never use `default`, `LATEST`, or `NEXT` for consensus execution. Add a scheduled protocol revision and new root vectors before enabling another fork.
+
+### L-023: [state] Account-root durability includes referenced storage tries (2026-07-22)
+- **Issue**: An account MPT is traversable even when the separately rooted contract-storage nodes referenced by its leaves were not committed.
+- **Trigger**: storage_root, trie manifest, restart, db inspect, contract storage
+- **Pattern**: Root reachability is recursive at the execution layer: current account nodes, every referenced storage trie, and current code hashes must all be durable. Checking only the top account MPT can report a false healthy state that cannot execute after restart.
+- **Evidence**: `TrieSnapshot::extend_nodes`, `ExecutionState::from_persisted`, `Database::validate_execution_root`.
+- **Confidence**: 10/10
+- **Action**: Include storage nodes in the same retention manifest and make inspection descend into storage roots and code before reporting healthy.
+
+### L-024: [evm] Block-invalid errors and EVM failure receipts have different rollback scopes (2026-07-22)
+- **Issue**: M4 needed to preserve nonce/gas on revert and out-of-gas without allowing an invalid transaction or aggregate block overflow to mutate its parent state.
+- **Trigger**: revert, out of gas, invalid transaction, block gas, proposal validation
+- **Pattern**: Execute a candidate batch on a cloned parent state. Decoder/signature/chain ID/nonce/funds and block-limit failures discard the candidate clone; valid EVM revert/halt applies the journaled nonce and actual fee while reverting value/code/storage/log changes and emits status zero.
+- **Evidence**: `arbor-executor::execute_batch`, `crates/arbor-executor/tests/m4_execution.rs`.
+- **Confidence**: 10/10
+- **Action**: Do not flatten both failure classes into one error or one rollback path; M5 block validation must preserve this distinction.

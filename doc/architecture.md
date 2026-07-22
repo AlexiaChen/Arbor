@@ -208,6 +208,8 @@ Account {
 
 系统功能实现为保留地址上的 native system contract（stateful precompile）：对用户暴露稳定 ABI，由 executor 拦截调用并通过同一 journal 写普通 EVM account/storage，因此成功结果进入 state root 和 receipt/log，外层 revert 也必须完整回滚。它不是旧 Template，也不是节点本地配置。precompile 地址、ABI hash、gas schedule 和实现版本由 `ProtocolSpec` 固定。
 
+M4 首个 registry 版本只启用只读 `protocolInfo()`：地址 `0x0000000000000000000000000000000000000800`、selector `0x93420cf4`、native execution gas 500。它通过 `revm` 的 `PrecompileProvider` 执行，错误 calldata 或非零 value 走 EVM revert；不能在 EVM 外手工修改 nonce、费用或余额。返回 ABI words 为 `(protocol_revision, evm_revision, registry_version, chain_id)`。
+
 ### 5.2 交易 envelope
 
 用户交易从第一版采用 EIP-2718 typed envelope，v1 至少支持 EIP-1559 type-2 transaction：
@@ -241,17 +243,23 @@ execute_batch(
 
 EVM revision、opcode/gas schedule、base fee 公式、block env 字段和 system contract 版本由 `protocol_revision` 固定。升级必须在已知共识高度激活，不能跟随节点安装的 `revm` 版本自动变化。
 
+protocol revision 1 精确映射 `revm` 41.0.0 的 Shanghai `SpecId`，不是 `revm::SpecId::default()` 或 `LATEST/NEXT`。执行输入显式给出 domain number、consensus timestamp、beneficiary、gas limit、base fee 和 prevrandao；adapter 固定 chain ID/code/initcode limits，并保持 Ethereum nonce、balance、intrinsic gas、refund、base-fee burn 和 priority-fee reward 检查。每个 batch 从 parent `ExecutionState` clone 开始，block-invalid 错误丢弃 clone；EVM revert/halt 则应用 `revm` journal 中保留的 nonce 和实际 gas 费用。
+
 ### 5.4 Receipt 和日志
 
 共识 receipt 采用 Ethereum 兼容字段和编码：status、cumulative gas used、logs bloom、logs。`contract_address`、单笔 `gas_used` 和 revert reason 可作为 RPC 派生字段。`state_diff_hash` 可用于调试索引，但不进入 Ethereum receipt root。
 
 交易根、receipt 根、logs bloom、空 trie root 和 trie key 编码必须在协议规范中给出算法和黄金向量，不能只写“Merkle root”。
 
+M4 直接以原始 EIP-2718 envelope 和 typed receipt bytes 调用 Ethereum ordered MPT：key 是 `RLP(transaction_index)`，value 不加 Arbor wrapper。receipt bloom 对每个 log address/topic 使用 Ethereum 2048-bit bloom，block bloom 是 receipt bloom 的 OR；RPC-only output、contract address、单笔 gas 和 revert data 不进入 receipt root。精确规则和向量见 [execution protocol](protocol/execution.md)。
+
 ## 6. 状态承诺与 parity-db
 
 parity-db 是持久化引擎，不是状态根算法。Arbor 使用独立的 authenticated state commitment：v1 实现 Ethereum Merkle Patricia Trie（Keccak + RLP）承诺 domain account/storage，以获得最直接的 EVM proof 语义；M0 已验证 `alloy-trie` 的 root/proof 与增量内容节点写入，并使用 parity-db 的 hash/B-tree columns 保存 node store 和元数据。若未来改用 sparse Merkle tree 作为账户树，必须通过 ADR 明确承认其 `eth_getProof` 和 Ethereum state root 不兼容。`domain_heads_root` 使用独立、固定 key/value 编码的 sparse Merkle map，不改变 domain 内 Ethereum state root。
 
 M3 的 production MPT materializer 输出标准 Ethereum RLP leaf/extension/branch node，把每个 node 按 Keccak content hash 存储，并用 `alloy-trie` 独立复核 root/proof。secure account/storage key 的 preimage 不可从 trie 反推，因此可重建 flat cache 以 `(domain_id, secure_key)` 为键；地址/slot 查询先计算 secure key。`domain_heads_root` 的 present/empty leaf 与逐层 branch 编码由 ADR-003 固定，proof 必须恰有 256 个 root-to-leaf sibling。
+
+合约账户叶子只承诺 `storage_root`，因此 durable manifest 还必须携带当前账户引用的每棵 storage trie 的 content nodes；只保存 account trie nodes 会在重启后得到表面可达但不可执行的 state root。M4 `ExecutionState` 用 raw address/slot 在访问时计算 secure key，从 account leaf 取得 storage root，再从同一 node store 加载 storage leaf；提交后的 `db inspect` 同时遍历 account/storage roots 并校验当前 code hash 可加载。
 
 建议 column families：
 
