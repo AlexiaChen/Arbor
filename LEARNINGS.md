@@ -253,3 +253,11 @@
 - **Evidence**: `DomainHistoryRetention`, `HistorySubscription`, `local_history_selection_does_not_change_domain_validity_or_roots`.
 - **Confidence**: 10/10
 - **Action**: Keep subscription objects out of `ChainMachine` and executor inputs; apply them only at the derived-history persistence/service edge.
+
+### L-032: [testing] Milestone coverage requires explicit invariant assertions (2026-07-22)
+- **Issue**: M6 was initially marked complete because its main flow happened to exercise idle domains, duplicate scheduling, and restart, while several acceptance invariants had no direct regression assertion.
+- **Trigger**: milestone completion, partial coverage, duplicate name, state isolation, scheduler fairness
+- **Pattern**: A behavior observed incidentally inside a larger smoke flow is not complete test coverage. Boundary matrices, status-zero rejection receipts, all four EVM state dimensions, unchanged idle headers, and fairness under an actually binding total budget each need named assertions.
+- **Evidence**: M6 `arbor-system` and `arbor-consensus` regression tests named in `doc/plan.md`.
+- **Confidence**: 10/10
+- **Action**: Before closing a milestone, map every test bullet to a named test and verify the fixture makes the claimed limit or failure path active.

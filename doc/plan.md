@@ -196,6 +196,8 @@ arbor node run --dev-validator --data-dir ./tmp/node1
 
 完成记录：[M6 ChainRegistry and tree-domain protocol](protocol/domains.md)；固定 ABI/lifecycle 与 root -> child 向量见 `testdata/vectors/arbor-v1/m6-domain-roots.txt`。`scripts/check-m6-smoke.sh` 是 fresh dev chain 的可执行验收；它不替代 M9 的公开 RPC、通用 CLI 和生产 keystore。
 
+测试补齐记录：`arbor-system` 的 `creation_is_idempotent_and_duplicate_display_names_do_not_alias_ids`、`creation_rejects_invalid_parameters_metadata_deposit_and_height` 覆盖确定性、参数矩阵和押金边界；`arbor-consensus` 的 `chain_registry_allows_duplicate_names_and_reverts_rejected_creations`、`parent_child_nonce_balance_code_and_storage_are_fully_isolated`、`idle_domains_do_not_advance_and_fair_scheduler_rotates_without_starvation` 分别覆盖共识执行拒绝回执、完整状态隔离，以及 idle 头冻结与受总 gas 预算压力的公平轮转。
+
 交付：
 
 - 根 domain 的 `ChainRegistry.create_chain` native precompile ABI 和状态机；`parent_domain_id` 可指向任意 active domain。

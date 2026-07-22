@@ -980,6 +980,22 @@ mod tests {
         evm_chain_id: u64,
         name: &str,
     ) -> Bytes {
+        create_chain_transaction_with_value(
+            nonce,
+            parent_domain_id,
+            evm_chain_id,
+            name,
+            MIN_CREATION_DEPOSIT,
+        )
+    }
+
+    fn create_chain_transaction_with_value(
+        nonce: u64,
+        parent_domain_id: DomainId,
+        evm_chain_id: u64,
+        name: &str,
+        value: U256,
+    ) -> Bytes {
         sign(Eip1559Transaction {
             chain_id: 2_048,
             nonce,
@@ -987,7 +1003,7 @@ mod tests {
             max_fee_per_gas: 20,
             gas_limit: 500_000,
             to: Some(CHAIN_REGISTRY_ADDRESS),
-            value: MIN_CREATION_DEPOSIT,
+            value,
             input: encode_create_chain_call(&CreateChainRequest {
                 parent_domain_id,
                 name: name.to_owned(),
@@ -1008,20 +1024,48 @@ mod tests {
     }
 
     fn domain_transfer(chain_id: u64, nonce: u64, value: u64) -> Bytes {
+        domain_transaction(
+            chain_id,
+            nonce,
+            Some(RECIPIENT),
+            Bytes::new(),
+            U256::from(value),
+            21_000,
+        )
+    }
+
+    fn domain_transaction(
+        chain_id: u64,
+        nonce: u64,
+        to: Option<Address>,
+        input: Bytes,
+        value: U256,
+        gas_limit: u64,
+    ) -> Bytes {
         sign(Eip1559Transaction {
             chain_id,
             nonce,
             max_priority_fee_per_gas: 2,
             max_fee_per_gas: 20,
-            gas_limit: 21_000,
-            to: Some(RECIPIENT),
-            value: U256::from(value),
-            input: Bytes::new(),
+            gas_limit,
+            to,
+            value,
+            input,
             access_list: Vec::new(),
             y_parity: false,
             r: U256::ZERO,
             s: U256::ZERO,
         })
+    }
+
+    fn initcode(runtime: &[u8]) -> Bytes {
+        let offset = 12_u8;
+        let length = u8::try_from(runtime.len()).unwrap();
+        let mut code = vec![
+            0x60, length, 0x60, offset, 0x60, 0x00, 0x39, 0x60, length, 0x60, 0x00, 0xf3,
+        ];
+        code.extend_from_slice(runtime);
+        code.into()
     }
 
     fn m6_genesis() -> DevGenesis {
@@ -1401,6 +1445,353 @@ mod tests {
             database.domain_registry(grandchild_id).unwrap().unwrap(),
             expected_descriptor
         );
+    }
+
+    #[test]
+    fn chain_registry_allows_duplicate_names_and_reverts_rejected_creations() {
+        let dir = tempdir().unwrap();
+        let root = m6_genesis().root_domain_id;
+        let mut engine = open_m6(dir.path());
+
+        let first = create_chain_transaction(0, root, 2_049, "Repeated Name");
+        let second = create_chain_transaction(1, root, 2_050, "Repeated Name");
+        let first_hash =
+            eip1559_transaction_hash(&arbor_codec::decode_eip1559(&first).unwrap()).unwrap();
+        let second_hash =
+            eip1559_transaction_hash(&arbor_codec::decode_eip1559(&second).unwrap()).unwrap();
+        let first_id = derive_domain_id(identity().network_id, root, first_hash);
+        let second_id = derive_domain_id(identity().network_id, root, second_hash);
+        engine.submit_raw(root, first).unwrap();
+        engine.submit_raw(root, second).unwrap();
+        engine.produce_block(1_001).unwrap();
+
+        assert_ne!(first_id, second_id);
+        for domain_id in [first_id, second_id] {
+            assert_eq!(
+                engine
+                    .finalized_state()
+                    .domain_descriptor(domain_id)
+                    .unwrap()
+                    .name,
+                "Repeated Name"
+            );
+        }
+
+        let underfunded = create_chain_transaction_with_value(
+            2,
+            root,
+            2_051,
+            "Underfunded",
+            MIN_CREATION_DEPOSIT - U256::from(1),
+        );
+        let unknown_parent = create_chain_transaction(
+            3,
+            DomainId(B256::repeat_byte(0x99)),
+            2_052,
+            "Unknown Parent",
+        );
+        let chain_id_conflict = create_chain_transaction(4, root, 2_049, "Chain ID Conflict");
+        let rejected = [underfunded, unknown_parent, chain_id_conflict]
+            .into_iter()
+            .map(|envelope| {
+                let transaction = arbor_codec::decode_eip1559(&envelope).unwrap();
+                let hash = eip1559_transaction_hash(&transaction).unwrap();
+                let request = arbor_system::decode_create_chain_call(&transaction.input).unwrap();
+                let domain_id =
+                    derive_domain_id(identity().network_id, request.parent_domain_id, hash);
+                (envelope, hash, domain_id)
+            })
+            .collect::<Vec<_>>();
+        for (envelope, _, _) in &rejected {
+            engine.submit_raw(root, envelope.clone()).unwrap();
+        }
+        engine.produce_block(1_002).unwrap();
+
+        for (_, hash, domain_id) in rejected {
+            let receipt = engine.receipt(hash).unwrap().unwrap();
+            assert!(
+                !arbor_codec::decode_eip1559_receipt(&receipt)
+                    .unwrap()
+                    .status
+            );
+            assert!(engine.finalized_state().domain(domain_id).is_none());
+        }
+        assert_eq!(
+            engine
+                .finalized_state()
+                .domain(root)
+                .unwrap()
+                .state
+                .account(SENDER)
+                .unwrap()
+                .unwrap()
+                .nonce,
+            5
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn parent_child_nonce_balance_code_and_storage_are_fully_isolated() {
+        const STORAGE_RUNTIME: &[u8] = &[
+            0x60, 0x00, 0x35, 0x80, 0x60, 0x00, 0x55, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00,
+            0xf3,
+        ];
+        const PARENT_RUNTIME: &[u8] = &[0x00];
+        const PARENT_ONLY: Address = address!("0000000000000000000000000000000000000cab");
+
+        let dir = tempdir().unwrap();
+        let mut genesis = m6_genesis();
+        genesis.allocations.insert(
+            PARENT_ONLY,
+            GenesisAccount {
+                nonce: 7,
+                balance: U256::from(777),
+                code: Bytes::from_static(PARENT_RUNTIME),
+                storage: BTreeMap::from([(U256::ZERO, U256::from(99))]),
+            },
+        );
+        let root = genesis.root_domain_id;
+        let database = Database::open(dir.path(), identity(), RetentionPolicy::Archive).unwrap();
+        let mut engine = SingleValidatorEngine::open(
+            EngineMode::DevValidator,
+            database,
+            genesis,
+            MempoolConfig::default(),
+        )
+        .unwrap();
+
+        let creation = create_chain_transaction(0, root, 2_049, "Isolated");
+        let creation_hash =
+            eip1559_transaction_hash(&arbor_codec::decode_eip1559(&creation).unwrap()).unwrap();
+        let child_id = derive_domain_id(identity().network_id, root, creation_hash);
+        engine.submit_raw(root, creation).unwrap();
+        engine.produce_block(1_001).unwrap();
+
+        let parent_code_hash = keccak256(PARENT_RUNTIME);
+        let root_state = &engine.finalized_state().domain(root).unwrap().state;
+        let parent_account = root_state.account(PARENT_ONLY).unwrap().unwrap();
+        assert_eq!(parent_account.nonce, 7);
+        assert_eq!(parent_account.balance, U256::from(777));
+        assert_eq!(parent_account.code_hash, parent_code_hash);
+        assert_eq!(
+            root_state.storage(PARENT_ONLY, U256::ZERO).unwrap(),
+            U256::from(99)
+        );
+
+        let child_state = &engine.finalized_state().domain(child_id).unwrap().state;
+        assert!(child_state.account(PARENT_ONLY).unwrap().is_none());
+        assert_eq!(
+            child_state.storage(PARENT_ONLY, U256::ZERO).unwrap(),
+            U256::ZERO
+        );
+        assert!(!child_state.contract_code().contains_key(&parent_code_hash));
+
+        let root_head_before_child_execution =
+            engine.finalized_state().domain(root).unwrap().clone();
+        let deploy = domain_transaction(
+            2_049,
+            0,
+            None,
+            initcode(STORAGE_RUNTIME),
+            U256::ZERO,
+            250_000,
+        );
+        engine.submit_raw(child_id, deploy).unwrap();
+        let proposal = engine.build_proposal(1_002).unwrap();
+        let contract = engine.pending.as_ref().unwrap().proposal.executions()[0].transactions[0]
+            .contract_address
+            .unwrap();
+        engine.commit_proposal(proposal).unwrap();
+
+        let mut word = [0_u8; 32];
+        word[31] = 42;
+        engine
+            .submit_raw(
+                child_id,
+                domain_transaction(
+                    2_049,
+                    1,
+                    Some(contract),
+                    Bytes::copy_from_slice(&word),
+                    U256::ZERO,
+                    150_000,
+                ),
+            )
+            .unwrap();
+        engine.produce_block(1_003).unwrap();
+
+        let child_state = &engine.finalized_state().domain(child_id).unwrap().state;
+        let child_sender = child_state.account(SENDER).unwrap().unwrap();
+        let child_contract = child_state.account(contract).unwrap().unwrap();
+        let child_code_hash = keccak256(STORAGE_RUNTIME);
+        assert_eq!(child_sender.nonce, 2);
+        assert!(child_sender.balance < U256::from(10_u128.pow(18)));
+        assert_eq!(child_contract.code_hash, child_code_hash);
+        assert_eq!(
+            child_state.storage(contract, U256::ZERO).unwrap(),
+            U256::from(42)
+        );
+        assert!(child_state.contract_code().contains_key(&child_code_hash));
+
+        let root_after_child_execution = engine.finalized_state().domain(root).unwrap();
+        assert_eq!(
+            root_after_child_execution,
+            &root_head_before_child_execution
+        );
+        assert!(
+            root_after_child_execution
+                .state
+                .account(contract)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            root_after_child_execution
+                .state
+                .storage(contract, U256::ZERO)
+                .unwrap(),
+            U256::ZERO
+        );
+        assert!(
+            !root_after_child_execution
+                .state
+                .contract_code()
+                .contains_key(&child_code_hash)
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn idle_domains_do_not_advance_and_fair_scheduler_rotates_without_starvation() {
+        let dir = tempdir().unwrap();
+        let root = m6_genesis().root_domain_id;
+        let mut engine = open_m6(dir.path());
+        let mut children = Vec::new();
+        for offset in 0_u64..7 {
+            let chain_id = 2_049 + offset;
+            let creation = create_chain_transaction(offset, root, chain_id, "Same Display Name");
+            let hash =
+                eip1559_transaction_hash(&arbor_codec::decode_eip1559(&creation).unwrap()).unwrap();
+            children.push((
+                derive_domain_id(identity().network_id, root, hash),
+                chain_id,
+            ));
+            engine.submit_raw(root, creation).unwrap();
+        }
+        engine.produce_block(1_001).unwrap();
+        assert_eq!(
+            children
+                .iter()
+                .map(|(domain_id, _)| *domain_id)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            children.len()
+        );
+        for (domain_id, _) in &children {
+            assert_eq!(
+                engine
+                    .finalized_state()
+                    .domain_descriptor(*domain_id)
+                    .unwrap()
+                    .name,
+                "Same Display Name"
+            );
+        }
+
+        let idle_heads = children
+            .iter()
+            .map(|(domain_id, _)| {
+                (
+                    *domain_id,
+                    engine.finalized_state().domain(*domain_id).unwrap().clone(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        engine
+            .submit_raw(root, domain_transfer(2_048, 7, 1))
+            .unwrap();
+        engine.produce_block(1_002).unwrap();
+        for (domain_id, idle) in &idle_heads {
+            let after = engine.finalized_state().domain(*domain_id).unwrap();
+            assert_eq!(after.header.number, idle.header.number);
+            assert_eq!(after.header.base_fee_per_gas, idle.header.base_fee_per_gas);
+            assert_eq!(after.block_hash, idle.block_hash);
+            assert_eq!(after, idle);
+        }
+
+        let mut active = vec![(root, 2_048, 8_u64)];
+        active.extend(
+            children
+                .iter()
+                .map(|(domain_id, chain_id)| (*domain_id, *chain_id, 0)),
+        );
+        for (domain_id, chain_id, first_nonce) in &active {
+            let gas_limit = engine
+                .finalized_state()
+                .domain(*domain_id)
+                .unwrap()
+                .config
+                .gas_limit;
+            for nonce in *first_nonce..(*first_nonce + 16) {
+                engine
+                    .submit_raw(
+                        *domain_id,
+                        domain_transaction(
+                            *chain_id,
+                            nonce,
+                            Some(RECIPIENT),
+                            Bytes::new(),
+                            U256::from(1),
+                            gas_limit,
+                        ),
+                    )
+                    .unwrap();
+            }
+        }
+
+        let expected = active
+            .iter()
+            .map(|(domain_id, _, _)| *domain_id)
+            .collect::<BTreeSet<_>>();
+        let mut seen = BTreeSet::new();
+        let mut selected_sets = BTreeSet::new();
+        for round in 0_u64..u64::try_from(active.len()).unwrap() {
+            let proposal = engine.build_proposal(1_003 + round).unwrap();
+            let block = engine.pending_block(proposal).unwrap();
+            let selected = block
+                .batches
+                .iter()
+                .map(|batch| {
+                    assert_eq!(batch.transactions.len(), 1, "per-domain fair quota");
+                    batch.domain_id
+                })
+                .collect::<BTreeSet<_>>();
+            assert!(!selected.is_empty());
+            seen.extend(selected.iter().copied());
+            selected_sets.insert(selected);
+            engine.commit_proposal(proposal).unwrap();
+        }
+        assert_eq!(seen, expected);
+        assert!(
+            selected_sets.len() > 1,
+            "scheduler did not rotate its selected domain set"
+        );
+        for (domain_id, _, first_nonce) in active {
+            assert!(
+                engine
+                    .finalized_state()
+                    .domain(domain_id)
+                    .unwrap()
+                    .state
+                    .account(SENDER)
+                    .unwrap()
+                    .unwrap()
+                    .nonce
+                    > first_nonce,
+                "active domain {domain_id:?} was starved"
+            );
+        }
     }
 
     #[test]

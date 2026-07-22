@@ -777,4 +777,121 @@ mod tests {
         assert_eq!(prepared.deposit_unlock_height, 107);
         assert_eq!(creation_storage_writes(&prepared).len(), 7);
     }
+
+    #[test]
+    fn creation_is_idempotent_and_duplicate_display_names_do_not_alias_ids() {
+        let request =
+            decode_create_chain_call(&encode_create_chain_call(&request()).unwrap()).unwrap();
+        let prepare = |create_tx_hash| {
+            prepare_chain_creation(
+                request.clone(),
+                NetworkId(B256::repeat_byte(0x22)),
+                create_tx_hash,
+                B256::repeat_byte(0x44),
+                B256::repeat_byte(0x55),
+                MIN_CREATION_DEPOSIT,
+                7,
+            )
+            .unwrap()
+        };
+
+        let first = prepare(B256::repeat_byte(0x33));
+        let replay = prepare(B256::repeat_byte(0x33));
+        let same_name_other_transaction = prepare(B256::repeat_byte(0x34));
+
+        assert_eq!(first, replay);
+        assert_eq!(
+            first.descriptor.name,
+            same_name_other_transaction.descriptor.name
+        );
+        assert_ne!(
+            first.descriptor.domain_id,
+            same_name_other_transaction.descriptor.domain_id
+        );
+        assert_ne!(
+            first.descriptor_hash,
+            same_name_other_transaction.descriptor_hash
+        );
+    }
+
+    #[test]
+    fn creation_rejects_invalid_parameters_metadata_deposit_and_height() {
+        let valid = request();
+        let invalid_requests = [
+            CreateChainRequest {
+                parent_domain_id: DomainId(B256::ZERO),
+                ..valid.clone()
+            },
+            CreateChainRequest {
+                evm_chain_id: 0,
+                ..valid.clone()
+            },
+            CreateChainRequest {
+                owner: Address::ZERO,
+                ..valid.clone()
+            },
+            CreateChainRequest {
+                gas_limit: 0,
+                ..valid.clone()
+            },
+            CreateChainRequest {
+                gas_limit: 30_000_001,
+                ..valid.clone()
+            },
+            CreateChainRequest {
+                initial_base_fee: u128::from(u64::MAX) + 1,
+                ..valid.clone()
+            },
+            CreateChainRequest {
+                protocol_revision: 2,
+                ..valid.clone()
+            },
+        ];
+        for invalid in invalid_requests {
+            assert!(matches!(
+                encode_create_chain_call(&invalid),
+                Err(ChainRegistryError::InvalidParameter(_))
+            ));
+        }
+        for (name, symbol) in [("", "DMO"), ("bad/name", "DMO"), ("Demo", "D-MO")] {
+            assert_eq!(
+                encode_create_chain_call(&CreateChainRequest {
+                    name: name.to_owned(),
+                    symbol: symbol.to_owned(),
+                    ..valid.clone()
+                }),
+                Err(ChainRegistryError::InvalidMetadata)
+            );
+        }
+
+        let canonical =
+            decode_create_chain_call(&encode_create_chain_call(&valid).unwrap()).unwrap();
+        assert_eq!(
+            prepare_chain_creation(
+                canonical.clone(),
+                NetworkId(B256::repeat_byte(0x22)),
+                B256::repeat_byte(0x33),
+                B256::repeat_byte(0x44),
+                B256::repeat_byte(0x55),
+                MIN_CREATION_DEPOSIT - U256::from(1),
+                7,
+            ),
+            Err(ChainRegistryError::InsufficientDeposit {
+                minimum: MIN_CREATION_DEPOSIT,
+                actual: MIN_CREATION_DEPOSIT - U256::from(1),
+            })
+        );
+        assert_eq!(
+            prepare_chain_creation(
+                canonical,
+                NetworkId(B256::repeat_byte(0x22)),
+                B256::repeat_byte(0x33),
+                B256::repeat_byte(0x44),
+                B256::repeat_byte(0x55),
+                MIN_CREATION_DEPOSIT,
+                u64::MAX,
+            ),
+            Err(ChainRegistryError::HeightOverflow)
+        );
+    }
 }
