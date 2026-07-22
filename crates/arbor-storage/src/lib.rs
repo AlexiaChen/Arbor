@@ -125,6 +125,8 @@ pub struct CommitBatch {
     pub receipts: Vec<IndexedValue>,
     /// Transaction/block/log indexes.
     pub indexes: Vec<IndexedValue>,
+    /// Canonically encoded new `ChainRegistry` projection records keyed by domain ID.
+    pub domain_registry: Vec<IndexedValue>,
 }
 
 impl CommitBatch {
@@ -137,6 +139,7 @@ impl CommitBatch {
             contract_code: BTreeMap::new(),
             receipts: Vec::new(),
             indexes: Vec::new(),
+            domain_registry: Vec::new(),
         }
     }
 }
@@ -329,6 +332,20 @@ impl Database {
                 .into_iter()
                 .map(|record| (COLUMN_INDEXES, record.key, Some(record.value))),
         );
+        for record in batch.domain_registry {
+            if record.key.len() != 32 {
+                return Err(StorageError::CorruptMetadata("domain registry key length"));
+            }
+            match self.db.get(COLUMN_DOMAIN_REGISTRY, &record.key)? {
+                Some(existing) if existing != record.value => {
+                    return Err(StorageError::CorruptMetadata(
+                        "immutable domain registry conflict",
+                    ));
+                }
+                Some(_) => {}
+                None => transaction.push((COLUMN_DOMAIN_REGISTRY, record.key, Some(record.value))),
+            }
+        }
         transaction.push((
             COLUMN_META,
             KEY_MARKER.to_vec(),
@@ -869,7 +886,11 @@ fn validate_unique(batch: &CommitBatch) -> Result<(), StorageError> {
     {
         return Err(StorageError::DuplicateCommitKey("domain state"));
     }
-    for (name, values) in [("receipt", &batch.receipts), ("index", &batch.indexes)] {
+    for (name, values) in [
+        ("receipt", &batch.receipts),
+        ("index", &batch.indexes),
+        ("domain registry", &batch.domain_registry),
+    ] {
         let mut keys = BTreeSet::new();
         if values.iter().any(|entry| !keys.insert(&entry.key)) {
             return Err(StorageError::DuplicateCommitKey(name));

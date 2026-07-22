@@ -9,7 +9,7 @@ mod execute;
 mod spec;
 mod state;
 
-pub use execute::{EvmExecution, execute_transaction};
+pub use execute::{EvmExecution, execute_transaction, execute_transaction_with_system};
 pub use spec::{DomainEnv, EvmRevision, ProtocolSpec};
 pub use state::{ExecutionState, GenesisAccount};
 

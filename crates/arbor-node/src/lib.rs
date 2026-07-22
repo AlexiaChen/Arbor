@@ -10,7 +10,7 @@ mod error;
 mod shutdown;
 mod supervisor;
 
-pub use config::{Config, ConfigError, NetworkConfig, NodeConfig};
+pub use config::{Config, ConfigError, HistorySubscription, NetworkConfig, NodeConfig};
 pub use error::{ErrorClass, NodeError};
 pub use shutdown::{Shutdown, ShutdownTrigger};
 pub use supervisor::{Supervisor, SupervisorError};
@@ -18,7 +18,9 @@ pub use supervisor::{Supervisor, SupervisorError};
 use std::{path::Path, time::Duration};
 
 use alloy_primitives::keccak256;
-use arbor_consensus::{ConsensusError, DevGenesis, EngineMode, SingleValidatorEngine};
+use arbor_consensus::{
+    ConsensusError, DevGenesis, DomainHistoryRetention, EngineMode, SingleValidatorEngine,
+};
 use arbor_mempool::MempoolConfig;
 use arbor_primitives::NetworkId;
 use arbor_storage::{Database, DatabaseIdentity, RetentionPolicy, StorageError};
@@ -55,16 +57,36 @@ pub fn open_database(data_dir: &Path) -> Result<Database, StorageError> {
 ///
 /// Returns [`DevNodeError`] for genesis, storage, or replay inconsistency.
 pub fn initialize_dev_chain(data_dir: &Path) -> Result<(), DevNodeError> {
+    open_dev_engine(data_dir, &HistorySubscription::All)?;
+    Ok(())
+}
+
+/// Opens or replays the deterministic development engine with local history settings.
+///
+/// The setting controls only derived receipt and transaction-location persistence. Every domain
+/// is executed and its latest authenticated state remains available for consensus validation.
+///
+/// # Errors
+///
+/// Returns [`DevNodeError`] for genesis, storage, or replay inconsistency.
+pub fn open_dev_engine(
+    data_dir: &Path,
+    history: &HistorySubscription,
+) -> Result<SingleValidatorEngine, DevNodeError> {
     let identity = dev_database_identity();
     let genesis = DevGenesis::local_default(identity.network_id, identity.genesis_hash)?;
+    let history_retention = history.selected_domains(genesis.root_domain_id).map_or(
+        DomainHistoryRetention::All,
+        DomainHistoryRetention::Selected,
+    );
     let database = open_database(data_dir)?;
-    SingleValidatorEngine::open(
+    Ok(SingleValidatorEngine::open_with_history(
         EngineMode::DevValidator,
         database,
         genesis,
         MempoolConfig::default(),
-    )?;
-    Ok(())
+        history_retention,
+    )?)
 }
 
 /// Runs the M5 immediate-finality development engine until graceful shutdown.
@@ -77,17 +99,10 @@ pub fn initialize_dev_chain(data_dir: &Path) -> Result<(), DevNodeError> {
 /// Returns [`DevNodeError`] when database open/replay or block production fails.
 pub async fn run_dev_validator(
     data_dir: &Path,
+    history: HistorySubscription,
     mut shutdown: Shutdown,
 ) -> Result<(), DevNodeError> {
-    let identity = dev_database_identity();
-    let genesis = DevGenesis::local_default(identity.network_id, identity.genesis_hash)?;
-    let database = open_database(data_dir)?;
-    let mut engine = SingleValidatorEngine::open(
-        EngineMode::DevValidator,
-        database,
-        genesis,
-        MempoolConfig::default(),
-    )?;
+    let mut engine = open_dev_engine(data_dir, &history)?;
     let mut interval = tokio::time::interval(Duration::from_millis(250));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {

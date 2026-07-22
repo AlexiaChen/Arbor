@@ -262,9 +262,17 @@ dependencies = [
 name = "arbor-cli"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
+ "arbor-chain",
+ "arbor-codec",
+ "arbor-consensus",
+ "arbor-crypto",
  "arbor-node",
+ "arbor-primitives",
  "arbor-storage",
+ "arbor-system",
  "clap",
+ "k256",
  "thiserror",
  "tokio",
  "tracing",
@@ -292,6 +300,7 @@ dependencies = [
  "arbor-mempool",
  "arbor-primitives",
  "arbor-storage",
+ "arbor-system",
  "arbor-testkit",
  "k256",
  "tempfile",
@@ -419,6 +428,10 @@ name = "arbor-system"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
+ "arbor-codec",
+ "arbor-crypto",
+ "arbor-primitives",
+ "thiserror",
 ]
 
 [[package]]

@@ -10,14 +10,20 @@ use arbor_codec::{
     decode_domain_batch, decode_domain_header, encode_consensus_header, encode_domain_batch,
     encode_domain_header,
 };
-use arbor_crypto::{consensus_header_hash, domain_header_hash};
+use arbor_crypto::{
+    consensus_header_hash, derive_domain_id, domain_genesis_hash, domain_header_hash,
+};
 use arbor_evm::{DomainEnv, ExecutionState};
-use arbor_executor::{DomainExecutionResult, ExecutorError, ExecutorService};
+use arbor_executor::{
+    ChainRegistryExecutionContext, CreatedDomain, DomainExecutionResult, ExecutorError,
+    ExecutorService,
+};
 use arbor_primitives::{
     CANONICAL_CODEC_VERSION, ConsensusBlockHeader, ConsensusHeight, DomainBatch, DomainBlockHeader,
-    DomainId, DomainNumber, NetworkId, PROTOCOL_VERSION,
+    DomainDescriptor, DomainGenesis, DomainId, DomainNumber, DomainStatus, NetworkId,
+    PROTOCOL_VERSION,
 };
-use arbor_state::{DomainHead, DomainHeadsCommitment};
+use arbor_state::{DomainHead, DomainHeadProof, DomainHeadsCommitment};
 use thiserror::Error;
 
 /// Maximum execution gas consumed across all batches in one consensus block.
@@ -84,6 +90,27 @@ pub struct FinalizedDomain {
     pub state: ExecutionState,
 }
 
+/// Genesis inputs for the finalized multi-domain application view.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FinalizedChainGenesis {
+    /// Genesis-bound network identifier.
+    pub network_id: NetworkId,
+    /// Height-zero consensus hash.
+    pub consensus_hash: B256,
+    /// Height-zero consensus timestamp.
+    pub timestamp: u64,
+    /// Initial validator-set commitment.
+    pub validator_set_hash: B256,
+    /// Root EVM domain identifier.
+    pub root_domain_id: DomainId,
+    /// Genesis-bound root-governance executor.
+    pub governance_address: Address,
+    /// Root EVM execution parameters.
+    pub config: DomainConfig,
+    /// Root authenticated execution state.
+    pub state: ExecutionState,
+}
+
 /// Finalized application view used as the only parent for proposal execution.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FinalizedChainState {
@@ -99,7 +126,10 @@ pub struct FinalizedChainState {
     pub validator_set_hash: B256,
     /// Next validator-set commitment.
     pub next_validator_set_hash: B256,
+    root_domain_id: DomainId,
+    governance_address: Address,
     domains: BTreeMap<DomainId, FinalizedDomain>,
+    descriptors: BTreeMap<DomainId, DomainDescriptor>,
 }
 
 impl FinalizedChainState {
@@ -108,15 +138,17 @@ impl FinalizedChainState {
     /// # Errors
     ///
     /// Returns [`ChainError`] for invalid root-domain parameters or an inconsistent state root.
-    pub fn genesis(
-        network_id: NetworkId,
-        genesis_consensus_hash: B256,
-        timestamp: u64,
-        validator_set_hash: B256,
-        root_domain_id: DomainId,
-        config: DomainConfig,
-        state: ExecutionState,
-    ) -> Result<Self, ChainError> {
+    pub fn genesis(genesis: FinalizedChainGenesis) -> Result<Self, ChainError> {
+        let FinalizedChainGenesis {
+            network_id,
+            consensus_hash,
+            timestamp,
+            validator_set_hash,
+            root_domain_id,
+            governance_address,
+            config,
+            state,
+        } = genesis;
         config.validate()?;
         let header = DomainBlockHeader {
             protocol_version: PROTOCOL_VERSION,
@@ -136,10 +168,12 @@ impl FinalizedChainState {
         Ok(Self {
             network_id,
             height: ConsensusHeight(0),
-            consensus_hash: genesis_consensus_hash,
+            consensus_hash,
             timestamp,
             validator_set_hash,
             next_validator_set_hash: validator_set_hash,
+            root_domain_id,
+            governance_address,
             domains: BTreeMap::from([(
                 root_domain_id,
                 FinalizedDomain {
@@ -149,6 +183,7 @@ impl FinalizedChainState {
                     state,
                 },
             )]),
+            descriptors: BTreeMap::new(),
         })
     }
 
@@ -161,6 +196,66 @@ impl FinalizedChainState {
     /// Iterates finalized domains in canonical `domain_id` order.
     pub fn domains(&self) -> impl Iterator<Item = (DomainId, &FinalizedDomain)> {
         self.domains.iter().map(|(id, domain)| (*id, domain))
+    }
+
+    /// Returns the immutable root-domain identifier.
+    #[must_use]
+    pub const fn root_domain_id(&self) -> DomainId {
+        self.root_domain_id
+    }
+
+    /// Returns the genesis-bound root-governance executor.
+    #[must_use]
+    pub const fn governance_address(&self) -> Address {
+        self.governance_address
+    }
+
+    /// Returns a runtime-created domain descriptor from the root registry projection.
+    #[must_use]
+    pub fn domain_descriptor(&self, domain_id: DomainId) -> Option<&DomainDescriptor> {
+        self.descriptors.get(&domain_id)
+    }
+
+    /// Iterates runtime-created descriptors in canonical domain-ID order.
+    pub fn domain_descriptors(&self) -> impl Iterator<Item = (DomainId, &DomainDescriptor)> {
+        self.descriptors
+            .iter()
+            .map(|(id, descriptor)| (*id, descriptor))
+    }
+
+    /// Returns the root-to-target genealogy, including the root and target IDs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ChainError`] for an unknown target or a corrupt/cyclic registry projection.
+    pub fn genealogy(&self, domain_id: DomainId) -> Result<Vec<DomainId>, ChainError> {
+        if !self.domains.contains_key(&domain_id) {
+            return Err(ChainError::UnknownDomain(domain_id));
+        }
+        let mut reversed = vec![domain_id];
+        let mut current = domain_id;
+        let mut seen = BTreeSet::from([domain_id]);
+        while current != self.root_domain_id {
+            let descriptor = self
+                .descriptors
+                .get(&current)
+                .ok_or(ChainError::RegistryInvariant("missing parent descriptor"))?;
+            current = descriptor.parent_domain_id;
+            if !seen.insert(current) {
+                return Err(ChainError::RegistryInvariant("cyclic domain genealogy"));
+            }
+            reversed.push(current);
+        }
+        reversed.reverse();
+        Ok(reversed)
+    }
+
+    /// Builds a checkpoint proof for one current domain head.
+    #[must_use]
+    pub fn domain_head_proof(&self, domain_id: DomainId) -> Option<DomainHeadProof> {
+        self.domains
+            .contains_key(&domain_id)
+            .then(|| heads_commitment(&self.domains).proof(domain_id))
     }
 
     /// Adds another height-zero domain while assembling deterministic genesis.
@@ -214,6 +309,111 @@ impl FinalizedChainState {
     pub fn domain_heads_root(&self) -> B256 {
         heads_commitment(&self.domains).root()
     }
+
+    fn insert_created_domain(
+        &mut self,
+        created: &CreatedDomain,
+        height: ConsensusHeight,
+    ) -> Result<(), ChainError> {
+        let descriptor = &created.descriptor;
+        if self.domains.contains_key(&descriptor.domain_id)
+            || self.descriptors.contains_key(&descriptor.domain_id)
+        {
+            return Err(ChainError::DuplicateCreatedDomain(descriptor.domain_id));
+        }
+        if !self.domains.contains_key(&descriptor.parent_domain_id) {
+            return Err(ChainError::RegistryInvariant(
+                "created domain parent is absent",
+            ));
+        }
+        if descriptor.status != DomainStatus::Active
+            || derive_domain_id(
+                self.network_id,
+                descriptor.parent_domain_id,
+                descriptor.create_tx_hash,
+            ) != descriptor.domain_id
+        {
+            return Err(ChainError::RegistryInvariant(
+                "created domain identity/status mismatch",
+            ));
+        }
+        if self
+            .domains
+            .values()
+            .any(|domain| domain.config.chain_id == descriptor.evm_chain_id)
+        {
+            return Err(ChainError::RegistryInvariant("duplicate EVM chain ID"));
+        }
+        let config = DomainConfig {
+            chain_id: descriptor.evm_chain_id,
+            protocol_revision: descriptor.protocol_revision,
+            gas_limit: descriptor.gas_limit,
+            initial_base_fee_per_gas: descriptor.initial_base_fee,
+        };
+        config.validate()?;
+        validate_domain_genesis(descriptor, &created.genesis_state)?;
+        let header = DomainBlockHeader {
+            protocol_version: PROTOCOL_VERSION,
+            domain_id: descriptor.domain_id,
+            number: DomainNumber(0),
+            parent_hash: B256::ZERO,
+            consensus_height: height,
+            transactions_root: empty_ordered_trie_root(),
+            state_root: created.genesis_state.state_root(),
+            receipts_root: empty_ordered_trie_root(),
+            logs_bloom: Bloom::default(),
+            gas_limit: descriptor.gas_limit,
+            gas_used: 0,
+            base_fee_per_gas: descriptor.initial_base_fee,
+        };
+        let block_hash = domain_header_hash(&header).map_err(ChainError::hash)?;
+        self.domains.insert(
+            descriptor.domain_id,
+            FinalizedDomain {
+                config,
+                header,
+                block_hash,
+                state: created.genesis_state.clone(),
+            },
+        );
+        self.descriptors
+            .insert(descriptor.domain_id, descriptor.clone());
+        Ok(())
+    }
+}
+
+fn validate_domain_genesis(
+    descriptor: &DomainDescriptor,
+    state: &ExecutionState,
+) -> Result<(), ChainError> {
+    let owner_balance = state
+        .account(descriptor.owner)
+        .map_err(ChainError::hash)?
+        .map_or(U256::ZERO, |account| account.balance);
+    if owner_balance != descriptor.initial_supply {
+        return Err(ChainError::RegistryInvariant(
+            "owner allocation differs from initial supply",
+        ));
+    }
+    let genesis = DomainGenesis {
+        domain_id: descriptor.domain_id,
+        parent_domain_id: descriptor.parent_domain_id,
+        joint_domain_block_hash: descriptor.joint_domain_block_hash,
+        create_tx_hash: descriptor.create_tx_hash,
+        name: descriptor.name.clone(),
+        symbol: descriptor.symbol.clone(),
+        evm_chain_id: descriptor.evm_chain_id,
+        owner: descriptor.owner,
+        protocol_revision: descriptor.protocol_revision,
+        gas_limit: descriptor.gas_limit,
+        initial_base_fee: descriptor.initial_base_fee,
+        initial_supply: descriptor.initial_supply,
+        initial_state_root: state.state_root(),
+    };
+    if domain_genesis_hash(&genesis).map_err(ChainError::hash)? != descriptor.origin_hash {
+        return Err(ChainError::RegistryInvariant("domain origin hash mismatch"));
+    }
+    Ok(())
 }
 
 /// Body finalized under a root-consensus header.
@@ -235,6 +435,129 @@ impl ConsensusBlock {
     /// Returns [`ChainError`] if header encoding unexpectedly exceeds its budget.
     pub fn hash(&self) -> Result<B256, ChainError> {
         consensus_header_hash(&self.header).map_err(ChainError::hash)
+    }
+
+    /// Builds a domain-result inclusion proof for a batch executed in this block.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ChainError`] if the result header cannot be canonically encoded.
+    pub fn domain_result_proof(
+        &self,
+        domain_id: DomainId,
+    ) -> Result<Option<DomainResultProof>, ChainError> {
+        let Some(index) = self
+            .domain_blocks
+            .iter()
+            .position(|header| header.domain_id == domain_id)
+        else {
+            return Ok(None);
+        };
+        let values = self
+            .domain_blocks
+            .iter()
+            .map(encode_domain_header)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(ChainError::hash)?;
+        let count = u32::try_from(values.len())
+            .map_err(|_| ChainError::Encoding("domain result count".to_owned()))?;
+        let mut level = values
+            .iter()
+            .enumerate()
+            .map(|(position, value)| collection_leaf(RESULT_LEAF_TAG, count, position, value))
+            .collect::<Vec<_>>();
+        let mut cursor = index;
+        let mut depth = 0_u16;
+        let mut siblings = Vec::new();
+        while level.len() > 1 {
+            let sibling = if cursor.is_multiple_of(2) {
+                level
+                    .get(cursor + 1)
+                    .copied()
+                    .unwrap_or_else(|| merkle_empty(RESULT_LEAF_TAG, depth))
+            } else {
+                level[cursor - 1]
+            };
+            siblings.push(sibling);
+            level = level
+                .chunks(2)
+                .map(|pair| {
+                    collection_branch(
+                        RESULT_LEAF_TAG,
+                        depth,
+                        pair[0],
+                        pair.get(1)
+                            .copied()
+                            .unwrap_or_else(|| merkle_empty(RESULT_LEAF_TAG, depth)),
+                    )
+                })
+                .collect();
+            cursor /= 2;
+            depth = depth.saturating_add(1);
+        }
+        Ok(Some(DomainResultProof {
+            root: self.header.domain_results_root,
+            result: self.domain_blocks[index].clone(),
+            index: u32::try_from(index)
+                .map_err(|_| ChainError::Encoding("domain result index".to_owned()))?,
+            count,
+            siblings,
+        }))
+    }
+}
+
+/// Binary Merkle inclusion proof for one domain result in a finalized consensus block.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DomainResultProof {
+    /// `domain_results_root` from the consensus header.
+    pub root: B256,
+    /// Included domain block header.
+    pub result: DomainBlockHeader,
+    /// Zero-based canonical result position.
+    pub index: u32,
+    /// Total committed result count.
+    pub count: u32,
+    /// Siblings from leaf level upward.
+    pub siblings: Vec<B256>,
+}
+
+impl DomainResultProof {
+    /// Verifies leaf position, tree shape, and root binding.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ChainError`] for malformed shape, encoding failure, or a root mismatch.
+    pub fn verify(&self) -> Result<(), ChainError> {
+        if self.count == 0 || self.index >= self.count {
+            return Err(ChainError::InvalidResultProof("index/count"));
+        }
+        let mut expected_levels = 0_usize;
+        let mut width = self.count as usize;
+        while width > 1 {
+            expected_levels += 1;
+            width = width.div_ceil(2);
+        }
+        if self.siblings.len() != expected_levels {
+            return Err(ChainError::InvalidResultProof("depth"));
+        }
+        let encoded = encode_domain_header(&self.result).map_err(ChainError::hash)?;
+        let mut hash = collection_leaf(RESULT_LEAF_TAG, self.count, self.index as usize, &encoded);
+        let mut cursor = self.index as usize;
+        for (depth, sibling) in self.siblings.iter().enumerate() {
+            let depth = u16::try_from(depth)
+                .map_err(|_| ChainError::InvalidResultProof("depth overflow"))?;
+            hash = if cursor.is_multiple_of(2) {
+                collection_branch(RESULT_LEAF_TAG, depth, hash, *sibling)
+            } else {
+                collection_branch(RESULT_LEAF_TAG, depth, *sibling, hash)
+            };
+            cursor /= 2;
+        }
+        let actual = collection_root(RESULT_LEAF_TAG, self.count, hash);
+        if actual != self.root {
+            return Err(ChainError::InvalidResultProof("root mismatch"));
+        }
+        Ok(())
     }
 }
 
@@ -304,6 +627,12 @@ pub enum ChainError {
     /// Genesis assembly attempted to register the same domain twice.
     #[error("duplicate genesis domain {0:?}")]
     DuplicateGenesisDomain(DomainId),
+    /// A proposal attempted to publish the same runtime domain twice.
+    #[error("duplicate created domain {0:?}")]
+    DuplicateCreatedDomain(DomainId),
+    /// Root-registry projection disagrees with authenticated execution output.
+    #[error("ChainRegistry invariant failed: {0}")]
+    RegistryInvariant(&'static str),
     /// Proposal does not extend the current finalized consensus head.
     #[error("consensus parent/height does not extend the finalized head")]
     WrongConsensusParent,
@@ -382,6 +711,9 @@ pub enum ChainError {
     /// Persisted/network block body is malformed.
     #[error("invalid consensus block body: {0}")]
     Decode(&'static str),
+    /// A domain-result inclusion proof has an invalid shape or root.
+    #[error("invalid domain result proof: {0}")]
+    InvalidResultProof(&'static str),
 }
 
 impl ChainError {
@@ -474,6 +806,11 @@ impl ChainMachine {
         let mut domain_blocks = Vec::with_capacity(batches.len());
         let mut executions = Vec::with_capacity(batches.len());
         let mut aggregate_gas = 0_u64;
+        let finalized_heads = parent
+            .domains
+            .iter()
+            .map(|(domain_id, domain)| (*domain_id, domain.block_hash))
+            .collect::<BTreeMap<_, _>>();
 
         for batch in &batches {
             let finalized = parent
@@ -490,6 +827,14 @@ impl ChainMachine {
                 height,
                 timestamp,
                 proposer,
+                &ChainRegistryExecutionContext {
+                    network_id: parent.network_id,
+                    root_domain_id: parent.root_domain_id,
+                    executing_domain_id: batch.domain_id,
+                    creation_height: height.0,
+                    governance_address: parent.governance_address,
+                    finalized_heads: finalized_heads.clone(),
+                },
             )?;
             aggregate_gas =
                 aggregate_gas
@@ -500,6 +845,9 @@ impl ChainMachine {
                     })?;
             validate_aggregate_gas(aggregate_gas)?;
             resulting_state.domains.insert(batch.domain_id, next_domain);
+            for created in &execution.created_domains {
+                resulting_state.insert_created_domain(created, height)?;
+            }
             domain_blocks.push(header);
             executions.push(execution);
         }
@@ -552,6 +900,7 @@ fn execute_domain(
     height: ConsensusHeight,
     timestamp: u64,
     proposer: Address,
+    registry_context: &ChainRegistryExecutionContext,
 ) -> Result<(DomainBlockHeader, DomainExecutionResult, FinalizedDomain), ChainError> {
     let number = finalized
         .header
@@ -569,9 +918,10 @@ fn execute_domain(
         base_fee_per_gas: base_fee,
         prevrandao: derived_prevrandao(parent_consensus_hash, height),
     };
-    let execution = ExecutorService::new(finalized.config.protocol_revision)
-        .map_err(ChainError::hash)?
-        .execute_batch(env, &finalized.state, &batch.transactions)
+    let service =
+        ExecutorService::new(finalized.config.protocol_revision).map_err(ChainError::hash)?;
+    let execution = service
+        .execute_batch_with_registry(env, &finalized.state, &batch.transactions, registry_context)
         .map_err(|source| ChainError::Execution {
             domain_id: batch.domain_id,
             source,
@@ -742,24 +1092,7 @@ fn merkle_collection_root(leaf_tag: &[u8], values: &[Vec<u8>]) -> B256 {
     let mut level: Vec<B256> = values
         .iter()
         .enumerate()
-        .map(|(index, value)| {
-            let mut bytes = Vec::with_capacity(leaf_tag.len() + value.len() + 13);
-            bytes.extend_from_slice(leaf_tag);
-            bytes.push(CANONICAL_CODEC_VERSION);
-            bytes.extend_from_slice(&count.to_be_bytes());
-            bytes.extend_from_slice(
-                &u32::try_from(index)
-                    .expect("protocol collection index fits u32")
-                    .to_be_bytes(),
-            );
-            bytes.extend_from_slice(
-                &u32::try_from(value.len())
-                    .expect("canonical object size fits u32")
-                    .to_be_bytes(),
-            );
-            bytes.extend_from_slice(value);
-            keccak256(bytes)
-        })
+        .map(|(index, value)| collection_leaf(leaf_tag, count, index, value))
         .collect();
     if level.is_empty() {
         level.push(merkle_empty(leaf_tag, 0));
@@ -772,24 +1105,51 @@ fn merkle_collection_root(leaf_tag: &[u8], values: &[Vec<u8>]) -> B256 {
                 .get(1)
                 .copied()
                 .unwrap_or_else(|| merkle_empty(leaf_tag, depth));
-            let mut bytes = Vec::with_capacity(MERKLE_BRANCH_TAG.len() + leaf_tag.len() + 68);
-            bytes.extend_from_slice(MERKLE_BRANCH_TAG);
-            bytes.push(CANONICAL_CODEC_VERSION);
-            bytes.extend_from_slice(leaf_tag);
-            bytes.extend_from_slice(&depth.to_be_bytes());
-            bytes.extend_from_slice(pair[0].as_slice());
-            bytes.extend_from_slice(right.as_slice());
-            next.push(keccak256(bytes));
+            next.push(collection_branch(leaf_tag, depth, pair[0], right));
         }
         level = next;
         depth = depth.saturating_add(1);
     }
+    collection_root(leaf_tag, count, level[0])
+}
+
+fn collection_leaf(leaf_tag: &[u8], count: u32, index: usize, value: &[u8]) -> B256 {
+    let mut bytes = Vec::with_capacity(leaf_tag.len() + value.len() + 13);
+    bytes.extend_from_slice(leaf_tag);
+    bytes.push(CANONICAL_CODEC_VERSION);
+    bytes.extend_from_slice(&count.to_be_bytes());
+    bytes.extend_from_slice(
+        &u32::try_from(index)
+            .expect("protocol collection index fits u32")
+            .to_be_bytes(),
+    );
+    bytes.extend_from_slice(
+        &u32::try_from(value.len())
+            .expect("canonical object size fits u32")
+            .to_be_bytes(),
+    );
+    bytes.extend_from_slice(value);
+    keccak256(bytes)
+}
+
+fn collection_branch(leaf_tag: &[u8], depth: u16, left: B256, right: B256) -> B256 {
+    let mut bytes = Vec::with_capacity(MERKLE_BRANCH_TAG.len() + leaf_tag.len() + 68);
+    bytes.extend_from_slice(MERKLE_BRANCH_TAG);
+    bytes.push(CANONICAL_CODEC_VERSION);
+    bytes.extend_from_slice(leaf_tag);
+    bytes.extend_from_slice(&depth.to_be_bytes());
+    bytes.extend_from_slice(left.as_slice());
+    bytes.extend_from_slice(right.as_slice());
+    keccak256(bytes)
+}
+
+fn collection_root(leaf_tag: &[u8], count: u32, tree_hash: B256) -> B256 {
     let mut root = Vec::with_capacity(MERKLE_ROOT_TAG.len() + leaf_tag.len() + 38);
     root.extend_from_slice(MERKLE_ROOT_TAG);
     root.push(CANONICAL_CODEC_VERSION);
     root.extend_from_slice(leaf_tag);
     root.extend_from_slice(&count.to_be_bytes());
-    root.extend_from_slice(level[0].as_slice());
+    root.extend_from_slice(tree_hash.as_slice());
     keccak256(root)
 }
 
@@ -1037,15 +1397,16 @@ mod tests {
     }
 
     fn genesis() -> FinalizedChainState {
-        FinalizedChainState::genesis(
-            NetworkId(B256::repeat_byte(0x11)),
-            B256::repeat_byte(0x22),
-            1_000,
-            B256::repeat_byte(0x33),
-            ROOT,
-            config(),
-            state(),
-        )
+        FinalizedChainState::genesis(FinalizedChainGenesis {
+            network_id: NetworkId(B256::repeat_byte(0x11)),
+            consensus_hash: B256::repeat_byte(0x22),
+            timestamp: 1_000,
+            validator_set_hash: B256::repeat_byte(0x33),
+            root_domain_id: ROOT,
+            governance_address: address!("0000000000000000000000000000000000000fee"),
+            config: config(),
+            state: state(),
+        })
         .unwrap()
     }
 
@@ -1094,6 +1455,11 @@ mod tests {
     #[test]
     fn block_body_roundtrips_and_replays() {
         let (parent, proposal) = proposal();
+        let proof = proposal.block().domain_result_proof(ROOT).unwrap().unwrap();
+        proof.verify().unwrap();
+        let mut tampered = proof;
+        tampered.result.state_root = B256::repeat_byte(0xee);
+        assert!(tampered.verify().is_err());
         let encoded = encode_consensus_block(proposal.block()).unwrap();
         let decoded = decode_consensus_block(&encoded).unwrap();
         assert_eq!(&decoded, proposal.block());

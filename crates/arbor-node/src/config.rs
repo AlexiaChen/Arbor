@@ -1,8 +1,10 @@
 //! Versioned node configuration.
 
-use std::{fs, net::SocketAddr, path::Path};
+use std::{collections::BTreeSet, fs, net::SocketAddr, path::Path, str::FromStr};
 
-use serde::{Deserialize, Serialize};
+use alloy_primitives::B256;
+use arbor_primitives::DomainId;
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use thiserror::Error;
 
 /// Current on-disk configuration schema.
@@ -29,6 +31,80 @@ pub struct NodeConfig {
     /// Enables deterministic development genesis and permits `--dev-validator`.
     #[serde(default)]
     pub dev: bool,
+    /// Node-local transaction history: `all`, `root`, or `root,<domain-id>...`.
+    #[serde(default)]
+    pub domains: HistorySubscription,
+}
+
+/// Node-local domain-history selection; it cannot alter proposal execution or validity.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum HistorySubscription {
+    /// Retain derived transaction history for every known domain.
+    #[default]
+    All,
+    /// Retain root history plus the explicitly listed child domains.
+    RootAnd(BTreeSet<DomainId>),
+}
+
+impl HistorySubscription {
+    /// Resolves the symbolic `root` entry into a concrete set for the consensus persistence edge.
+    #[must_use]
+    pub fn selected_domains(&self, root_domain_id: DomainId) -> Option<BTreeSet<DomainId>> {
+        match self {
+            Self::All => None,
+            Self::RootAnd(domains) => {
+                let mut domains = domains.clone();
+                domains.insert(root_domain_id);
+                Some(domains)
+            }
+        }
+    }
+}
+
+impl Serialize for HistorySubscription {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let value = match self {
+            Self::All => "all".to_owned(),
+            Self::RootAnd(domains) => std::iter::once("root".to_owned())
+                .chain(domains.iter().map(|domain_id| domain_id.0.to_string()))
+                .collect::<Vec<_>>()
+                .join(","),
+        };
+        serializer.serialize_str(&value)
+    }
+}
+
+impl<'de> Deserialize<'de> for HistorySubscription {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        parse_history_subscription(&value).map_err(de::Error::custom)
+    }
+}
+
+fn parse_history_subscription(value: &str) -> Result<HistorySubscription, &'static str> {
+    if value == "all" {
+        return Ok(HistorySubscription::All);
+    }
+    let mut parts = value.split(',');
+    if parts.next() != Some("root") {
+        return Err("node.domains must be `all`, `root`, or `root,<domain-id>...`");
+    }
+    let mut domains = BTreeSet::new();
+    for part in parts {
+        if part.is_empty() || part == "root" || part == "all" {
+            return Err("node.domains contains an invalid entry");
+        }
+        let hash =
+            B256::from_str(part).map_err(|_| "node.domains contains an invalid domain ID")?;
+        domains.insert(DomainId(hash));
+    }
+    Ok(HistorySubscription::RootAnd(domains))
 }
 
 /// Local network settings.
@@ -46,6 +122,7 @@ impl Default for Config {
             node: NodeConfig {
                 moniker: "arbor-node".to_owned(),
                 dev: false,
+                domains: HistorySubscription::All,
             },
             network: NetworkConfig {
                 listen_addr: "127.0.0.1:0".parse().expect("literal address is valid"),
@@ -165,5 +242,35 @@ mod tests {
             Config::from_toml(&input),
             Err(ConfigError::UnsupportedVersion { actual: 2, .. })
         ));
+    }
+
+    #[test]
+    fn history_subscription_round_trips_and_rejects_ambiguous_forms() {
+        let domain = DomainId(B256::repeat_byte(0x42));
+        let mut config = Config::default();
+        config.node.domains = HistorySubscription::RootAnd(BTreeSet::from([domain]));
+        let encoded = config.to_toml().unwrap();
+        assert!(encoded.contains(&format!("domains = \"root,{}\"", domain.0)));
+        assert_eq!(Config::from_toml(&encoded).unwrap(), config);
+        assert_eq!(
+            config
+                .node
+                .domains
+                .selected_domains(DomainId(B256::repeat_byte(0x11)))
+                .unwrap()
+                .len(),
+            2
+        );
+
+        for invalid in ["child", "all,root", "root,all", "root,"] {
+            let input = Config::default()
+                .to_toml()
+                .unwrap()
+                .replace("domains = \"all\"", &format!("domains = \"{invalid}\""));
+            assert!(matches!(
+                Config::from_toml(&input),
+                Err(ConfigError::Decode(_))
+            ));
+        }
     }
 }

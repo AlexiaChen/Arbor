@@ -115,6 +115,8 @@ domain 的 EVM `block.number` 是该 domain 的逻辑序号，只在 domain batc
 
 M5 已将这条边界实现为 `ValidatedProposal`：构造阶段只保留私有执行 overlay 并 reserve mempool 条目；一次同步 parity-db transaction 原子写 block body、state/code、receipt/index、development WAL、domain head 与 finalized marker 后，才替换内存 finalized view 并发布 `CommitEvent`。恢复时从 genesis 重放持久化 block，并要求重放 head、marker、domain state head 与 WAL 完全一致。精确集合根、base fee、`PREVRANDAO` 和 body codec 见 [block protocol](protocol/blocks.md)。
 
+M6 在同一边界上加入 root-only `ChainRegistry`：proposal 开始时一次性捕获所有 finalized domain head，创建、押金 refund/burn 的 value、registry storage 和 event 在同一 `revm` journal 内成功或回滚；finalization transaction 同时写新 domain genesis state、descriptor 查询投影和全局 marker。新 domain 只可从下一共识高度进入 batch。精确 ABI、押金生命周期、scheduler、local history projection 和 proof 规则见 [domain protocol](protocol/domains.md)。
+
 ## 4. Domain 创建与生命周期
 
 ### 4.1 用户流程
@@ -189,7 +191,7 @@ BFT 保证已提议 block 的一致排序和最终性，不自动保证任意 do
 
 ### 4.3 本地订阅不是共识授权
 
-节点可配置 `--domains all|root,<id>...` 决定额外保存哪些历史 body、日志索引和 RPC 数据，但 validator/full verifier 必须保存所有 active domain 的最新可执行状态，并取得、执行当前共识块的全部 batch。只验证 header/proof 的 light node 可以不保存状态，但不能宣称完成 execution validation。订阅过滤不能影响 block validity、domain 是否存在或 domain 状态根，否则不同配置的节点会产生共识分裂。
+节点通过 `node.domains = "all|root,<id>..."` 决定保存哪些 domain 的派生 receipt/transaction-location 历史索引；后续 M7/M9 可在同一边界增加 body/log/RPC 历史服务。validator/full verifier 必须保存所有 active domain 的最新可执行状态，并取得、执行当前共识块的全部 batch。只验证 header/proof 的 light node 可以不保存状态，但不能宣称完成 execution validation。订阅过滤不能影响 block validity、domain 是否存在或 domain 状态根，否则不同配置的节点会产生共识分裂。
 
 ## 5. 账户、交易与 EVM
 
@@ -211,6 +213,8 @@ Account {
 系统功能实现为保留地址上的 native system contract（stateful precompile）：对用户暴露稳定 ABI，由 executor 拦截调用并通过同一 journal 写普通 EVM account/storage，因此成功结果进入 state root 和 receipt/log，外层 revert 也必须完整回滚。它不是旧 Template，也不是节点本地配置。precompile 地址、ABI hash、gas schedule 和实现版本由 `ProtocolSpec` 固定。
 
 M4 首个 registry 版本只启用只读 `protocolInfo()`：地址 `0x0000000000000000000000000000000000000800`、selector `0x93420cf4`、native execution gas 500。它通过 `revm` 的 `PrecompileProvider` 执行，错误 calldata 或非零 value 走 EVM revert；不能在 EVM 外手工修改 nonce、费用或余额。返回 ABI words 为 `(protocol_revision, evm_revision, registry_version, chain_id)`。
+
+M6 在 root domain 启用 `ChainRegistry` 地址 `0x0000000000000000000000000000000000000801`。`createChain`、owner `refundDeposit` 和 root-governance `burnDeposit` 的押金转账、descriptor/chain-ID/deposit slots、terminal status 和事件全部走同一 `revm` journal；其他 domain 上该地址不能写 root 控制面。ABI 和固定 gas 见 [domain protocol](protocol/domains.md)。
 
 ### 5.2 交易 envelope
 
@@ -359,6 +363,8 @@ staking、validator set 和治理交易只允许在根 domain 执行；子链原
 validator signer 在签名前持久化 `(height, round/view, phase, block_hash)`，拒绝冲突签名。远程 signer/HSM 是发布前安全项。
 
 M5 的 `SingleValidatorEngine` 仅在显式 `--dev-validator` 且 data directory 由 `node init --dev` 初始化时可用；它本地验证后立即 commit，不产生 vote/QC，也不声称 Byzantine safety。其 production mode 是硬失败，因此这条开发路径不能绕过 ADR-004 或解除 M8 阻塞。
+
+M6 扩展该开发引擎为按 active domain 隔离 mempool、轮转公平份额并构造多 batch，但这仍只是 honest proposer policy 和本地立即最终化；它不新增 vote/QC，也不构成 censorship resistance 或 BFT 证据。
 
 ## 8. 网络与同步
 

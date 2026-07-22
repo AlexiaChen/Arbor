@@ -2,16 +2,51 @@
 
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeMap;
+
 use alloy_primitives::{Address, B256, Bloom, Bytes};
 use alloy_trie::root::ordered_trie_root_encoded;
 use arbor_codec::{decode_eip1559, encode_eip1559_receipt};
 use arbor_crypto::{eip1559_transaction_hash, recover_eip1559_sender};
-use arbor_evm::{DomainEnv, EvmError, ExecutionState, ProtocolSpec, execute_transaction};
-use arbor_primitives::{Eip1559Transaction, Log, Receipt};
+use arbor_evm::{
+    DomainEnv, EvmError, ExecutionState, GenesisAccount, ProtocolSpec,
+    execute_transaction_with_system,
+};
+use arbor_primitives::{DomainDescriptor, DomainId, Eip1559Transaction, Log, NetworkId, Receipt};
+use arbor_system::{
+    CHAIN_REGISTRY_ADDRESS, ChainRegistryRuntime, PreparedChainCreation, decode_create_chain_call,
+    prepare_chain_creation,
+};
 use thiserror::Error;
 
 /// Maximum type-2 transactions in one domain batch.
 pub const MAX_TRANSACTIONS_PER_BATCH: usize = 10_000;
+
+/// Proposal-start inputs available only while executing the root registry.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChainRegistryExecutionContext {
+    /// Network domain separation used by deterministic domain IDs.
+    pub network_id: NetworkId,
+    /// The only domain allowed to mutate the registry.
+    pub root_domain_id: DomainId,
+    /// Domain whose batch is currently executing.
+    pub executing_domain_id: DomainId,
+    /// Consensus height being proposed.
+    pub creation_height: u64,
+    /// Root-governance executor authorized for registry lifecycle calls.
+    pub governance_address: Address,
+    /// Finalized heads captured before any batch in this proposal executes.
+    pub finalized_heads: BTreeMap<DomainId, B256>,
+}
+
+/// New domain state produced by one successful root registry transaction.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreatedDomain {
+    /// Root-registry descriptor committed by the transaction.
+    pub descriptor: DomainDescriptor,
+    /// Empty-state-plus-owner genesis authenticated state.
+    pub genesis_state: ExecutionState,
+}
 
 /// RPC/index-friendly fields derived while executing one transaction.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -49,6 +84,8 @@ pub struct DomainExecutionResult {
     pub encoded_receipts: Vec<Vec<u8>>,
     /// Non-consensus derived execution fields.
     pub transactions: Vec<ExecutedTransaction>,
+    /// Successful registry creations in exact transaction order.
+    pub created_domains: Vec<CreatedDomain>,
 }
 
 /// Block-invalid execution failure. EVM revert/halt is not an error here and yields status zero.
@@ -107,6 +144,14 @@ pub enum ExecutorError {
         /// Codec error.
         reason: String,
     },
+    /// Proposal-derived native system input could not be materialized.
+    #[error("transaction {index} native system preparation failed: {reason}")]
+    SystemPreparation {
+        /// Transaction position.
+        index: usize,
+        /// Stable failure context.
+        reason: String,
+    },
 }
 
 /// Minimal in-process execution service used before M9 RPC wiring.
@@ -138,7 +183,22 @@ impl ExecutorService {
         parent: &ExecutionState,
         envelopes: &[Bytes],
     ) -> Result<DomainExecutionResult, ExecutorError> {
-        execute_batch(self.spec, env, parent, envelopes)
+        execute_batch_with_registry(self.spec, env, parent, envelopes, None)
+    }
+
+    /// Executes a root batch with proposal-start `ChainRegistry` inputs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExecutorError`] under the same conditions as [`Self::execute_batch`].
+    pub fn execute_batch_with_registry(
+        &self,
+        env: DomainEnv,
+        parent: &ExecutionState,
+        envelopes: &[Bytes],
+        registry: &ChainRegistryExecutionContext,
+    ) -> Result<DomainExecutionResult, ExecutorError> {
+        execute_batch_with_registry(self.spec, env, parent, envelopes, Some(registry))
     }
 }
 
@@ -154,6 +214,16 @@ pub fn execute_batch(
     parent: &ExecutionState,
     envelopes: &[Bytes],
 ) -> Result<DomainExecutionResult, ExecutorError> {
+    execute_batch_with_registry(spec, env, parent, envelopes, None)
+}
+
+fn execute_batch_with_registry(
+    spec: ProtocolSpec,
+    env: DomainEnv,
+    parent: &ExecutionState,
+    envelopes: &[Bytes],
+    registry: Option<&ChainRegistryExecutionContext>,
+) -> Result<DomainExecutionResult, ExecutorError> {
     if envelopes.len() > MAX_TRANSACTIONS_PER_BATCH {
         return Err(ExecutorError::TooManyTransactions {
             limit: MAX_TRANSACTIONS_PER_BATCH,
@@ -167,6 +237,7 @@ pub fn execute_batch(
     let mut receipts = Vec::with_capacity(envelopes.len());
     let mut encoded_receipts = Vec::with_capacity(envelopes.len());
     let mut executed = Vec::with_capacity(envelopes.len());
+    let mut created_domains = Vec::new();
 
     for (index, envelope) in envelopes.iter().enumerate() {
         let transaction = decode_transaction(index, envelope)?;
@@ -189,23 +260,20 @@ pub fn execute_batch(
                 reason: error.to_string(),
             }
         })?;
-        let result = execute_transaction(&mut state, spec, env, &transaction, sender)
-            .map_err(|source| ExecutorError::Transaction { index, source })?;
+        let (prepared_creation, genesis_state) =
+            prepare_registry_creation(index, registry, &transaction, transaction_hash)?;
+        let registry_runtime = registry_runtime(registry, prepared_creation.clone());
+        let result = execute_transaction_with_system(
+            &mut state,
+            spec,
+            env,
+            &transaction,
+            sender,
+            registry_runtime,
+        )
+        .map_err(|source| ExecutorError::Transaction { index, source })?;
         cumulative_gas =
-            cumulative_gas
-                .checked_add(result.gas_used)
-                .ok_or(ExecutorError::BlockGasOverflow {
-                    index,
-                    used: u64::MAX,
-                    limit: env.gas_limit,
-                })?;
-        if cumulative_gas > env.gas_limit {
-            return Err(ExecutorError::BlockGasOverflow {
-                index,
-                used: cumulative_gas,
-                limit: env.gas_limit,
-            });
-        }
+            checked_cumulative_gas(index, cumulative_gas, result.gas_used, env.gas_limit)?;
         let receipt_bloom = logs_bloom(&result.logs);
         block_bloom.accrue_bloom(&receipt_bloom);
         let receipt = Receipt {
@@ -227,6 +295,16 @@ pub fn execute_batch(
             contract_address: result.created_address,
             output: result.output,
         });
+        if let Some(descriptor) = result.created_domain {
+            let genesis_state = genesis_state.ok_or_else(|| ExecutorError::SystemPreparation {
+                index,
+                reason: "successful registry call has no prepared genesis state".to_owned(),
+            })?;
+            created_domains.push(CreatedDomain {
+                descriptor,
+                genesis_state,
+            });
+        }
         receipts.push(receipt);
         encoded_receipts.push(encoded);
     }
@@ -240,7 +318,85 @@ pub fn execute_batch(
         receipts,
         encoded_receipts,
         transactions: executed,
+        created_domains,
     })
+}
+
+fn registry_runtime(
+    context: Option<&ChainRegistryExecutionContext>,
+    prepared_creation: Option<PreparedChainCreation>,
+) -> Option<ChainRegistryRuntime> {
+    context.map(|context| ChainRegistryRuntime {
+        root_domain_id: context.root_domain_id,
+        executing_domain_id: context.executing_domain_id,
+        consensus_height: context.creation_height,
+        governance_address: context.governance_address,
+        prepared_creation,
+    })
+}
+
+fn prepare_registry_creation(
+    index: usize,
+    registry: Option<&ChainRegistryExecutionContext>,
+    transaction: &Eip1559Transaction,
+    transaction_hash: B256,
+) -> Result<(Option<PreparedChainCreation>, Option<ExecutionState>), ExecutorError> {
+    let Some(registry) = registry else {
+        return Ok((None, None));
+    };
+    if registry.executing_domain_id != registry.root_domain_id
+        || transaction.to != Some(CHAIN_REGISTRY_ADDRESS)
+    {
+        return Ok((None, None));
+    }
+    let Ok(request) = decode_create_chain_call(&transaction.input) else {
+        return Ok((None, None));
+    };
+    let Some(&joint) = registry.finalized_heads.get(&request.parent_domain_id) else {
+        return Ok((None, None));
+    };
+    let genesis_state = ExecutionState::from_genesis(&BTreeMap::from([(
+        request.owner,
+        GenesisAccount {
+            balance: request.initial_supply,
+            ..GenesisAccount::default()
+        },
+    )]))
+    .map_err(|error| ExecutorError::SystemPreparation {
+        index,
+        reason: error.to_string(),
+    })?;
+    let Ok(prepared) = prepare_chain_creation(
+        request,
+        registry.network_id,
+        transaction_hash,
+        joint,
+        genesis_state.state_root(),
+        transaction.value,
+        registry.creation_height,
+    ) else {
+        return Ok((None, None));
+    };
+    Ok((Some(prepared), Some(genesis_state)))
+}
+
+fn checked_cumulative_gas(
+    index: usize,
+    current: u64,
+    transaction: u64,
+    limit: u64,
+) -> Result<u64, ExecutorError> {
+    let used = current
+        .checked_add(transaction)
+        .ok_or(ExecutorError::BlockGasOverflow {
+            index,
+            used: u64::MAX,
+            limit,
+        })?;
+    if used > limit {
+        return Err(ExecutorError::BlockGasOverflow { index, used, limit });
+    }
+    Ok(used)
 }
 
 fn decode_transaction(index: usize, envelope: &[u8]) -> Result<Eip1559Transaction, ExecutorError> {

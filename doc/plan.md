@@ -8,7 +8,8 @@
 - M3：完成。Ethereum secure MPT 的标准 RLP node、account/storage/absence proof、256 层 domain-head sparse commitment、overlay、parity-db schema/identity/atomic marker、archive/full retention、flat cache 重建、snapshot manifest 和 `arbor db inspect` 已落地；子进程 kill 窗口只恢复旧 commit 或完整新 commit，10 万账户 release 基准已记录。
 - M4：完成。`revm` 41.0.0 精确锁定，protocol revision 1 固定 Shanghai；authenticated account/storage adapter、EIP-1559 batch、native protocol-info precompile、receipt/logs bloom/ordered trie roots、revert/OOG/fee/refund 语义、per-domain mempool 和 parity-db 重启向量已落地。
 - M5：完成。`ConsensusBlock`/domain block 的确定性构造与完整重放校验、二进制 collection roots、时间/base-fee/资源限制、proposal overlay/mempool 回补、同步 parity-db 原子提交、finalized event、开发 genesis validator 和显式 `--dev-validator` 连续出块已落地；固定 transfer 可在提交前保持不可见、提交后查询 receipt，并在重启后得到相同 head/state/WAL。
-- M6 及以后：未开始；下一步实现 root `ChainRegistry` 与树形多 domain。M8 仍不得绕过 ADR-004 的重新接受条件固化 BFT 生产依赖。
+- M6：完成。root-only `ChainRegistry` 创建与 refund/burn 治理状态机、确定性 ID/origin/joint、隔离 child genesis、树形 descriptor/genealogy、domain head/result proof、多 domain mempool 与公平 dev scheduler、`node.domains` 本地历史投影、parity-db 原子投影和重启重放均已落地；dev-only CLI 已完成两层建链、双 domain 合约部署和同一 finalized block proof 验收。通用公开 RPC/CLI 与生产 keystore 仍属于 M9。
+- M7 及以后：未开始。M8 仍不得绕过 ADR-004 的重新接受条件固化 BFT 生产依赖。
 
 ## 1. 交付目标
 
@@ -192,6 +193,8 @@ arbor node run --dev-validator --data-dir ./tmp/node1
 实现记录：精确 block/body/collection-root/base-fee/commit 规则见 [block protocol](protocol/blocks.md)；固定 height-one 根见 `testdata/vectors/arbor-v1/m5-block-roots.txt`。`scripts/check-m5-smoke.sh` 验证 dev genesis、连续最终化、SIGTERM 和 durable reopen；raw transaction/receipt 路径由 in-process engine 集成测试覆盖，HTTP JSON-RPC 仍按计划属于 M9。
 
 ### M6：ChainRegistry 与树形多 domain
+
+完成记录：[M6 ChainRegistry and tree-domain protocol](protocol/domains.md)；固定 ABI/lifecycle 与 root -> child 向量见 `testdata/vectors/arbor-v1/m6-domain-roots.txt`。`scripts/check-m6-smoke.sh` 是 fresh dev chain 的可执行验收；它不替代 M9 的公开 RPC、通用 CLI 和生产 keystore。
 
 交付：
 

@@ -12,9 +12,17 @@ name = "arbor"
 path = "src/main.rs"
 
 [dependencies]
+alloy-primitives.workspace = true
+arbor-chain = { path = "../arbor-chain", version = "0.1.0" }
+arbor-codec = { path = "../arbor-codec", version = "0.1.0" }
+arbor-consensus = { path = "../arbor-consensus", version = "0.1.0" }
+arbor-crypto = { path = "../arbor-crypto", version = "0.1.0" }
+arbor-primitives = { path = "../arbor-primitives", version = "0.1.0" }
 arbor-node = { path = "../arbor-node", version = "0.1.0" }
 arbor-storage = { path = "../arbor-storage", version = "0.1.0" }
+arbor-system = { path = "../arbor-system", version = "0.1.0" }
 clap.workspace = true
+k256.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true

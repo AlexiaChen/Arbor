@@ -9,8 +9,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
 use arbor_chain::{
-    ChainError, ChainMachine, ConsensusBlock, DomainConfig, FinalizedChainState, ValidatedProposal,
-    decode_consensus_block, encode_consensus_block,
+    ChainError, ChainMachine, ConsensusBlock, DomainConfig, FinalizedChainGenesis,
+    FinalizedChainState, MAX_CONSENSUS_BLOCK_GAS, ValidatedProposal, decode_consensus_block,
+    encode_consensus_block,
 };
 use arbor_crypto::{ConsensusSigner, consensus_header_hash, validator_id, validator_set_hash};
 use arbor_evm::{ExecutionState, GenesisAccount};
@@ -20,6 +21,7 @@ use arbor_storage::{
     CommitBatch, CommitStats, Database, DomainStateCommit, FinalizedMarker, IndexedValue,
     StorageError,
 };
+use arbor_system::{CHAIN_REGISTRY_ADDRESS, root_registry_genesis_storage};
 use thiserror::Error;
 use tokio::sync::broadcast;
 
@@ -33,6 +35,8 @@ const PREFIX_TX_LOCATION: &[u8] = b"m5:tx:";
 
 /// Hard cap used by the M5 single-domain proposer before M6 adds fair multi-domain scheduling.
 pub const MAX_DEV_PROPOSAL_TRANSACTIONS: usize = 10_000;
+/// Honest-proposer cap per domain before another active domain gets a scheduling turn.
+pub const MAX_FAIR_DOMAIN_TRANSACTIONS: usize = 1_024;
 
 /// Explicit capability required to construct the non-BFT development engine.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -41,6 +45,33 @@ pub enum EngineMode {
     DevValidator,
     /// Production assembly, for which M5 deliberately provides no engine.
     Production,
+}
+
+/// Node-local transaction-history projection; never an input to proposal execution or validity.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum DomainHistoryRetention {
+    /// Persist receipt and transaction-location indexes for every domain.
+    #[default]
+    All,
+    /// Persist those history indexes only for the listed domains.
+    Selected(BTreeSet<DomainId>),
+}
+
+impl DomainHistoryRetention {
+    /// Builds an explicit selected-domain projection.
+    #[must_use]
+    pub fn selected(domains: impl IntoIterator<Item = DomainId>) -> Self {
+        Self::Selected(domains.into_iter().collect())
+    }
+
+    /// Returns whether derived transaction history is retained for `domain_id`.
+    #[must_use]
+    pub fn retains(&self, domain_id: DomainId) -> bool {
+        match self {
+            Self::All => true,
+            Self::Selected(domains) => domains.contains(&domain_id),
+        }
+    }
 }
 
 /// Deterministic root-domain and validator configuration for a development database.
@@ -60,6 +91,8 @@ pub struct DevGenesis {
     pub validator_set: ValidatorSet,
     /// Address receiving EIP-1559 priority fees in every included domain.
     pub reward_address: Address,
+    /// Root-governance executor authorized for native registry lifecycle calls.
+    pub governance_address: Address,
     /// Root-domain genesis account allocation, including any validator funding.
     pub allocations: BTreeMap<Address, GenesisAccount>,
 }
@@ -83,6 +116,9 @@ impl DevGenesis {
         let mut reward_bytes = [0_u8; 20];
         reward_bytes[18..].copy_from_slice(&[0x0f, 0xee]);
         let reward_address = Address::from(reward_bytes);
+        let mut governance_bytes = [0_u8; 20];
+        governance_bytes[18..].copy_from_slice(&[0x0f, 0xef]);
+        let governance_address = Address::from(governance_bytes);
         let funded_address = Address::from([
             0x4a, 0x62, 0x31, 0x66, 0x23, 0xad, 0x45, 0x7f, 0x02, 0xcd, 0xc5, 0xd9, 0x97, 0xde,
             0xd6, 0x7a, 0x38, 0x3e, 0xc5, 0x69,
@@ -107,6 +143,7 @@ impl DevGenesis {
                 }],
             },
             reward_address,
+            governance_address,
             allocations: BTreeMap::from([(
                 funded_address,
                 GenesisAccount {
@@ -125,8 +162,7 @@ impl DevGenesis {
         }
         let validator_hash = validator_set_hash(&self.validator_set)
             .map_err(|error| ConsensusError::InvalidGenesisOwned(error.to_string()))?;
-        let state = ExecutionState::from_genesis(&self.allocations)
-            .map_err(|error| ConsensusError::InvalidGenesisOwned(error.to_string()))?;
+        let state = self.execution_state()?;
         let mut bytes = Vec::with_capacity(DEV_GENESIS_TAG.len() + 256);
         bytes.extend_from_slice(DEV_GENESIS_TAG);
         bytes.extend_from_slice(self.network_id.0.as_slice());
@@ -139,6 +175,7 @@ impl DevGenesis {
         bytes.extend_from_slice(&self.root_config.initial_base_fee_per_gas.to_be_bytes());
         bytes.extend_from_slice(validator_hash.as_slice());
         bytes.extend_from_slice(self.reward_address.as_slice());
+        bytes.extend_from_slice(self.governance_address.as_slice());
         bytes.extend_from_slice(state.state_root().as_slice());
         Ok(keccak256(bytes))
     }
@@ -146,18 +183,47 @@ impl DevGenesis {
     fn chain_state(&self) -> Result<FinalizedChainState, ConsensusError> {
         let validator_hash = validator_set_hash(&self.validator_set)
             .map_err(|error| ConsensusError::InvalidGenesisOwned(error.to_string()))?;
-        let state = ExecutionState::from_genesis(&self.allocations)
-            .map_err(|error| ConsensusError::InvalidGenesisOwned(error.to_string()))?;
-        FinalizedChainState::genesis(
-            self.network_id,
-            self.genesis_hash,
-            self.timestamp,
-            validator_hash,
-            self.root_domain_id,
-            self.root_config,
+        let state = self.execution_state()?;
+        FinalizedChainState::genesis(FinalizedChainGenesis {
+            network_id: self.network_id,
+            consensus_hash: self.genesis_hash,
+            timestamp: self.timestamp,
+            validator_set_hash: validator_hash,
+            root_domain_id: self.root_domain_id,
+            governance_address: self.governance_address,
+            config: self.root_config,
             state,
-        )
+        })
         .map_err(ConsensusError::from)
+    }
+
+    fn execution_state(&self) -> Result<ExecutionState, ConsensusError> {
+        let mut allocations = self.allocations.clone();
+        let registry = allocations.entry(CHAIN_REGISTRY_ADDRESS).or_default();
+        if !registry.code.is_empty() {
+            return Err(ConsensusError::InvalidGenesis(
+                "native ChainRegistry address cannot contain bytecode",
+            ));
+        }
+        if registry.nonce != 0 {
+            return Err(ConsensusError::InvalidGenesis(
+                "native ChainRegistry genesis nonce is reserved",
+            ));
+        }
+        // EIP-161 emptiness ignores storage_root, so a storage-only native account would be
+        // removed while materializing genesis. The fixed nonce keeps the registry account alive.
+        registry.nonce = 1;
+        for (slot, value) in
+            root_registry_genesis_storage(self.root_domain_id, self.root_config.chain_id)
+        {
+            if registry.storage.insert(slot, value).is_some() {
+                return Err(ConsensusError::InvalidGenesis(
+                    "native ChainRegistry genesis slot collision",
+                ));
+            }
+        }
+        ExecutionState::from_genesis(&allocations)
+            .map_err(|error| ConsensusError::InvalidGenesisOwned(error.to_string()))
     }
 }
 
@@ -214,8 +280,8 @@ pub enum ConsensusError {
     /// Durable head, block record, application state, or WAL disagree.
     #[error("inconsistent finalized database: {0}")]
     InconsistentStore(&'static str),
-    /// Only the M5 root domain is registered before `ChainRegistry` lands in M6.
-    #[error("M5 only accepts transactions for the configured root domain")]
+    /// A transaction targets a domain absent from the finalized registry.
+    #[error("transaction targets an unknown domain")]
     UnknownDomain,
     /// Canonical chain construction or validation failed.
     #[error(transparent)]
@@ -236,6 +302,8 @@ pub struct SingleValidatorEngine {
     mempool: Mempool,
     pending: Option<PendingProposal>,
     events: broadcast::Sender<CommitEvent>,
+    scheduler_cursor: usize,
+    history_retention: DomainHistoryRetention,
 }
 
 impl SingleValidatorEngine {
@@ -250,6 +318,30 @@ impl SingleValidatorEngine {
         database: Database,
         genesis: DevGenesis,
         mempool_config: MempoolConfig,
+    ) -> Result<Self, ConsensusError> {
+        Self::open_with_history(
+            mode,
+            database,
+            genesis,
+            mempool_config,
+            DomainHistoryRetention::All,
+        )
+    }
+
+    /// Opens a development engine with a node-local derived-history projection.
+    ///
+    /// The projection is applied only while persisting receipt and transaction-location indexes;
+    /// every domain is still executed and its latest authenticated state remains durable.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::open`].
+    pub fn open_with_history(
+        mode: EngineMode,
+        database: Database,
+        genesis: DevGenesis,
+        mempool_config: MempoolConfig,
+        history_retention: DomainHistoryRetention,
     ) -> Result<Self, ConsensusError> {
         if mode != EngineMode::DevValidator {
             return Err(ConsensusError::DevModeRequired);
@@ -281,7 +373,9 @@ impl SingleValidatorEngine {
             }
         }
         let mut mempool = Mempool::new(mempool_config);
-        mempool.register_domain(genesis.root_domain_id, genesis.root_config.chain_id)?;
+        for (domain_id, domain) in finalized.domains() {
+            mempool.register_domain(domain_id, domain.config.chain_id)?;
+        }
         let (events, _) = broadcast::channel(64);
         Ok(Self {
             database,
@@ -290,6 +384,8 @@ impl SingleValidatorEngine {
             mempool,
             pending: None,
             events,
+            scheduler_cursor: 0,
+            history_retention,
         })
     }
 
@@ -324,9 +420,6 @@ impl SingleValidatorEngine {
         domain_id: DomainId,
         envelope: Bytes,
     ) -> Result<QueueStatus, ConsensusError> {
-        if domain_id != self.genesis.root_domain_id {
-            return Err(ConsensusError::UnknownDomain);
-        }
         let transaction = arbor_codec_decode(&envelope)?;
         let sender = arbor_crypto::recover_eip1559_sender(&transaction)
             .map_err(|error| MempoolError::InvalidTransaction(error.to_string()))?;
@@ -352,28 +445,33 @@ impl SingleValidatorEngine {
         if self.pending.is_some() {
             return Err(ConsensusError::ProposalPending);
         }
-        let selected = self.select_root_transactions()?;
+        let selected = self.select_transactions()?;
         let hashes = selected
             .iter()
             .map(|entry| entry.transaction_hash)
             .collect::<BTreeSet<_>>();
         let reserved = self.mempool.reserve_hashes(&hashes);
-        let batches = if reserved.is_empty() {
-            Vec::new()
-        } else {
-            let parent = self
-                .finalized
-                .domain(self.genesis.root_domain_id)
-                .ok_or(ConsensusError::UnknownDomain)?;
-            vec![DomainBatch {
-                domain_id: self.genesis.root_domain_id,
-                parent_domain_block_hash: parent.block_hash,
-                transactions: reserved
-                    .iter()
-                    .map(|entry| entry.envelope.clone())
-                    .collect(),
-            }]
-        };
+        let mut grouped = BTreeMap::<DomainId, Vec<Bytes>>::new();
+        for entry in &reserved {
+            grouped
+                .entry(entry.domain_id)
+                .or_default()
+                .push(entry.envelope.clone());
+        }
+        let batches = grouped
+            .into_iter()
+            .map(|(domain_id, transactions)| {
+                let parent = self
+                    .finalized
+                    .domain(domain_id)
+                    .ok_or(ConsensusError::UnknownDomain)?;
+                Ok(DomainBatch {
+                    domain_id,
+                    parent_domain_block_hash: parent.block_hash,
+                    transactions,
+                })
+            })
+            .collect::<Result<Vec<_>, ConsensusError>>()?;
         let proposal = match ChainMachine.build_proposal(
             &self.finalized,
             batches,
@@ -433,7 +531,26 @@ impl SingleValidatorEngine {
         let Some(pending) = self.pending.take() else {
             return Err(ConsensusError::UnknownProposal);
         };
-        let commit = proposal_commit_batch(&pending.proposal)?;
+        let created_domains = pending
+            .proposal
+            .executions()
+            .iter()
+            .flat_map(|execution| &execution.created_domains)
+            .map(|created| {
+                (
+                    created.descriptor.domain_id,
+                    created.descriptor.evm_chain_id,
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut next_mempool = self.mempool.clone();
+        for (domain_id, chain_id) in &created_domains {
+            if let Err(error) = next_mempool.register_domain(*domain_id, *chain_id) {
+                self.pending = Some(pending);
+                return Err(error.into());
+            }
+        }
+        let commit = proposal_commit_batch(&pending.proposal, &self.history_retention)?;
         let stats = match self.database.commit(commit) {
             Ok(stats) => stats,
             Err(error) => {
@@ -443,6 +560,9 @@ impl SingleValidatorEngine {
         };
         let (_, finalized, _) = pending.proposal.into_parts();
         self.finalized = finalized;
+        self.mempool = next_mempool;
+        self.scheduler_cursor =
+            self.scheduler_cursor.saturating_add(1) % self.finalized.domains().count().max(1);
         let event = CommitEvent {
             height: self.finalized.height.0,
             consensus_hash: self.finalized.consensus_hash,
@@ -482,36 +602,62 @@ impl SingleValidatorEngine {
         self.mempool.len()
     }
 
-    fn select_root_transactions(&self) -> Result<Vec<PoolEntry>, ConsensusError> {
-        let domain = self
-            .finalized
-            .domain(self.genesis.root_domain_id)
-            .ok_or(ConsensusError::UnknownDomain)?;
+    fn select_transactions(&self) -> Result<Vec<PoolEntry>, ConsensusError> {
+        let mut ready_by_domain = Vec::<(DomainId, u64, Vec<PoolEntry>)>::new();
+        for (domain_id, domain) in self.finalized.domains() {
+            let mut ready = Vec::new();
+            for sender in self.mempool.senders(domain_id) {
+                let nonce = domain
+                    .state
+                    .account(sender)
+                    .map_err(|error| ConsensusError::InvalidGenesisOwned(error.to_string()))?
+                    .map_or(0, |account| account.nonce);
+                ready.extend(
+                    self.mempool
+                        .ready(domain_id, sender, nonce)
+                        .into_iter()
+                        .cloned(),
+                );
+            }
+            ready.sort_by_key(|entry| (entry.sender, entry.transaction.nonce));
+            if !ready.is_empty() {
+                ready_by_domain.push((domain_id, domain.config.gas_limit, ready));
+            }
+        }
+        if ready_by_domain.is_empty() {
+            return Ok(Vec::new());
+        }
+        let domain_count = ready_by_domain.len();
+        let fair_share = MAX_CONSENSUS_BLOCK_GAS
+            / u64::try_from(domain_count).expect("bounded domain count fits u64");
+        ready_by_domain.rotate_left(self.scheduler_cursor % domain_count);
         let mut selected = Vec::new();
-        let mut reserved_gas = 0_u64;
-        for sender in self.mempool.senders(self.genesis.root_domain_id) {
-            let nonce = domain
-                .state
-                .account(sender)
-                .map_err(|error| ConsensusError::InvalidGenesisOwned(error.to_string()))?
-                .map_or(0, |account| account.nonce);
-            for entry in self
-                .mempool
-                .ready(self.genesis.root_domain_id, sender, nonce)
-            {
-                let Some(next_gas) = reserved_gas.checked_add(entry.transaction.gas_limit) else {
+        let mut aggregate_gas = 0_u64;
+        for (_, domain_limit, entries) in ready_by_domain {
+            let quota = fair_share.min(domain_limit);
+            let mut domain_gas = 0_u64;
+            for entry in entries.into_iter().take(MAX_FAIR_DOMAIN_TRANSACTIONS) {
+                let Some(next_domain_gas) = domain_gas.checked_add(entry.transaction.gas_limit)
+                else {
                     break;
                 };
-                if next_gas > domain.config.gas_limit
+                let Some(next_aggregate) = aggregate_gas.checked_add(entry.transaction.gas_limit)
+                else {
+                    break;
+                };
+                if next_domain_gas > domain_limit
+                    || next_aggregate > MAX_CONSENSUS_BLOCK_GAS
+                    || (next_domain_gas > quota && domain_gas != 0)
                     || selected.len() >= MAX_DEV_PROPOSAL_TRANSACTIONS
                 {
                     break;
                 }
-                reserved_gas = next_gas;
-                selected.push(entry.clone());
+                domain_gas = next_domain_gas;
+                aggregate_gas = next_aggregate;
+                selected.push(entry);
             }
         }
-        selected.sort_by_key(|entry| (entry.sender, entry.transaction.nonce));
+        selected.sort_by_key(|entry| (entry.domain_id, entry.sender, entry.transaction.nonce));
         Ok(selected)
     }
 }
@@ -583,7 +729,10 @@ fn verify_recovered(
     Ok(())
 }
 
-fn proposal_commit_batch(proposal: &ValidatedProposal) -> Result<CommitBatch, ConsensusError> {
+fn proposal_commit_batch(
+    proposal: &ValidatedProposal,
+    history_retention: &DomainHistoryRetention,
+) -> Result<CommitBatch, ConsensusError> {
     let block = proposal.block();
     let hash = consensus_header_hash(&block.header)
         .map_err(|error| ConsensusError::InvalidGenesisOwned(error.to_string()))?;
@@ -614,25 +763,41 @@ fn proposal_commit_batch(proposal: &ValidatedProposal) -> Result<CommitBatch, Co
         commit
             .contract_code
             .extend(execution.state.contract_code().clone());
-        for (index, (transaction, receipt)) in execution
-            .transactions
-            .iter()
-            .zip(&execution.encoded_receipts)
-            .enumerate()
-        {
-            commit.receipts.push(IndexedValue {
-                key: receipt_key(transaction.transaction_hash),
-                value: receipt.clone(),
+        if history_retention.retains(batch.domain_id) {
+            for (index, (transaction, receipt)) in execution
+                .transactions
+                .iter()
+                .zip(&execution.encoded_receipts)
+                .enumerate()
+            {
+                commit.receipts.push(IndexedValue {
+                    key: receipt_key(transaction.transaction_hash),
+                    value: receipt.clone(),
+                });
+                commit.indexes.push(IndexedValue {
+                    key: tx_location_key(transaction.transaction_hash),
+                    value: encode_tx_location(
+                        marker.height,
+                        batch.domain_id,
+                        u32::try_from(index).map_err(|_| {
+                            ConsensusError::InconsistentStore("transaction index overflow")
+                        })?,
+                    ),
+                });
+            }
+        }
+        for created in &execution.created_domains {
+            commit.states.push(DomainStateCommit {
+                domain_id: created.descriptor.domain_id,
+                snapshot: created.genesis_state.snapshot().clone(),
             });
-            commit.indexes.push(IndexedValue {
-                key: tx_location_key(transaction.transaction_hash),
-                value: encode_tx_location(
-                    marker.height,
-                    batch.domain_id,
-                    u32::try_from(index).map_err(|_| {
-                        ConsensusError::InconsistentStore("transaction index overflow")
-                    })?,
-                ),
+            commit
+                .contract_code
+                .extend(created.genesis_state.contract_code().clone());
+            commit.domain_registry.push(IndexedValue {
+                key: created.descriptor.domain_id.0.to_vec(),
+                value: arbor_codec::encode_domain_descriptor(&created.descriptor)
+                    .map_err(|error| ConsensusError::InvalidGenesisOwned(error.to_string()))?,
             });
         }
     }
@@ -688,9 +853,14 @@ mod tests {
 
     use alloy_primitives::{U256, address};
     use arbor_codec::{encode_eip1559, encode_eip1559_signing_payload};
-    use arbor_crypto::{ConsensusSigner, validator_id};
+    use arbor_crypto::{ConsensusSigner, derive_domain_id, eip1559_transaction_hash, validator_id};
     use arbor_primitives::{Eip1559Transaction, Validator};
     use arbor_storage::{DatabaseIdentity, RetentionPolicy};
+    use arbor_system::{
+        CHAIN_REGISTRY_ADDRESS, CreateChainRequest, CreationDepositStatus, MIN_CREATION_DEPOSIT,
+        deposit_slot, deposit_status_slot, descriptor_slot, encode_burn_deposit_call,
+        encode_create_chain_call, encode_refund_deposit_call,
+    };
     use arbor_testkit::ProcessGuard;
     use k256::ecdsa::SigningKey;
     use tempfile::tempdir;
@@ -731,6 +901,7 @@ mod tests {
                 }],
             },
             reward_address: REWARD,
+            governance_address: address!("0000000000000000000000000000000000000fef"),
             allocations: BTreeMap::from([
                 (
                     SENDER,
@@ -745,7 +916,7 @@ mod tests {
     }
 
     fn signed_transfer() -> Bytes {
-        let mut transaction = Eip1559Transaction {
+        sign(Eip1559Transaction {
             chain_id: 2_048,
             nonce: 0,
             max_priority_fee_per_gas: 2,
@@ -758,16 +929,105 @@ mod tests {
             y_parity: false,
             r: U256::ZERO,
             s: U256::ZERO,
-        };
+        })
+    }
+
+    fn sign(transaction: Eip1559Transaction) -> Bytes {
+        sign_with_secret(transaction, [7_u8; 32])
+    }
+
+    fn sign_with_secret(mut transaction: Eip1559Transaction, secret: [u8; 32]) -> Bytes {
         let payload = encode_eip1559_signing_payload(&transaction).unwrap();
         let digest = keccak256(payload);
-        let key = SigningKey::from_bytes((&[7_u8; 32]).into()).unwrap();
+        let key = SigningKey::from_bytes((&secret).into()).unwrap();
         let (signature, recovery_id) = key.sign_prehash_recoverable(digest.as_slice()).unwrap();
         let bytes = signature.to_bytes();
         transaction.r = U256::from_be_slice(&bytes[..32]);
         transaction.s = U256::from_be_slice(&bytes[32..]);
         transaction.y_parity = recovery_id.is_y_odd();
         encode_eip1559(&transaction).unwrap().into()
+    }
+
+    fn address_for_secret(secret: [u8; 32]) -> Address {
+        let key = SigningKey::from_bytes((&secret).into()).unwrap();
+        let public = key.verifying_key().to_encoded_point(false);
+        Address::from_slice(&keccak256(&public.as_bytes()[1..]).as_slice()[12..])
+    }
+
+    fn lifecycle_transaction(nonce: u64, input: Bytes, secret: [u8; 32]) -> Bytes {
+        sign_with_secret(
+            Eip1559Transaction {
+                chain_id: 2_048,
+                nonce,
+                max_priority_fee_per_gas: 2,
+                max_fee_per_gas: 20,
+                gas_limit: 250_000,
+                to: Some(CHAIN_REGISTRY_ADDRESS),
+                value: U256::ZERO,
+                input,
+                access_list: Vec::new(),
+                y_parity: false,
+                r: U256::ZERO,
+                s: U256::ZERO,
+            },
+            secret,
+        )
+    }
+
+    fn create_chain_transaction(
+        nonce: u64,
+        parent_domain_id: DomainId,
+        evm_chain_id: u64,
+        name: &str,
+    ) -> Bytes {
+        sign(Eip1559Transaction {
+            chain_id: 2_048,
+            nonce,
+            max_priority_fee_per_gas: 2,
+            max_fee_per_gas: 20,
+            gas_limit: 500_000,
+            to: Some(CHAIN_REGISTRY_ADDRESS),
+            value: MIN_CREATION_DEPOSIT,
+            input: encode_create_chain_call(&CreateChainRequest {
+                parent_domain_id,
+                name: name.to_owned(),
+                symbol: "TST".to_owned(),
+                evm_chain_id,
+                owner: SENDER,
+                gas_limit: 20_000_000,
+                initial_base_fee: 10,
+                initial_supply: U256::from(10_u128.pow(18)),
+                protocol_revision: 1,
+            })
+            .unwrap(),
+            access_list: Vec::new(),
+            y_parity: false,
+            r: U256::ZERO,
+            s: U256::ZERO,
+        })
+    }
+
+    fn domain_transfer(chain_id: u64, nonce: u64, value: u64) -> Bytes {
+        sign(Eip1559Transaction {
+            chain_id,
+            nonce,
+            max_priority_fee_per_gas: 2,
+            max_fee_per_gas: 20,
+            gas_limit: 21_000,
+            to: Some(RECIPIENT),
+            value: U256::from(value),
+            input: Bytes::new(),
+            access_list: Vec::new(),
+            y_parity: false,
+            r: U256::ZERO,
+            s: U256::ZERO,
+        })
+    }
+
+    fn m6_genesis() -> DevGenesis {
+        let mut genesis = genesis();
+        genesis.allocations.get_mut(&SENDER).unwrap().balance = U256::from(10_u128.pow(24));
+        genesis
     }
 
     fn open(path: &std::path::Path) -> SingleValidatorEngine {
@@ -777,6 +1037,32 @@ mod tests {
             database,
             genesis(),
             MempoolConfig::default(),
+        )
+        .unwrap()
+    }
+
+    fn open_m6(path: &std::path::Path) -> SingleValidatorEngine {
+        let database = Database::open(path, identity(), RetentionPolicy::Archive).unwrap();
+        SingleValidatorEngine::open(
+            EngineMode::DevValidator,
+            database,
+            m6_genesis(),
+            MempoolConfig::default(),
+        )
+        .unwrap()
+    }
+
+    fn open_m6_with_history(
+        path: &std::path::Path,
+        history: DomainHistoryRetention,
+    ) -> SingleValidatorEngine {
+        let database = Database::open(path, identity(), RetentionPolicy::Archive).unwrap();
+        SingleValidatorEngine::open_with_history(
+            EngineMode::DevValidator,
+            database,
+            m6_genesis(),
+            MempoolConfig::default(),
+            history,
         )
         .unwrap()
     }
@@ -924,6 +1210,359 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn chain_registry_creates_tree_domains_schedules_batches_and_replays() {
+        let dir = tempdir().unwrap();
+        let root = m6_genesis().root_domain_id;
+        let mut engine = open_m6(dir.path());
+        let root_joint = engine.finalized_state().domain(root).unwrap().block_hash;
+        assert_ne!(
+            engine
+                .finalized_state()
+                .domain(root)
+                .unwrap()
+                .state
+                .storage(CHAIN_REGISTRY_ADDRESS, descriptor_slot(root))
+                .unwrap(),
+            U256::ZERO
+        );
+
+        let child_envelope = create_chain_transaction(0, root, 2_049, "Child");
+        let child_transaction = arbor_codec::decode_eip1559(&child_envelope).unwrap();
+        let child_tx_hash = eip1559_transaction_hash(&child_transaction).unwrap();
+        let child_id = derive_domain_id(identity().network_id, root, child_tx_hash);
+        engine.submit_raw(root, child_envelope).unwrap();
+        let proposal = engine.build_proposal(1_001).unwrap();
+        assert_eq!(
+            engine.pending.as_ref().unwrap().proposal.executions()[0]
+                .created_domains
+                .len(),
+            1,
+            "registry execution: {:?}",
+            engine.pending.as_ref().unwrap().proposal.executions()[0].transactions
+        );
+        assert!(engine.finalized_state().domain(child_id).is_none());
+        engine.commit_proposal(proposal).unwrap();
+
+        let child = engine.finalized_state().domain(child_id).unwrap();
+        assert_eq!(child.header.number.0, 0);
+        assert_eq!(
+            child.state.account(SENDER).unwrap().unwrap().balance,
+            U256::from(10_u128.pow(18))
+        );
+        let descriptor = engine
+            .finalized_state()
+            .domain_descriptor(child_id)
+            .unwrap();
+        let vectors = include_str!("../../../testdata/vectors/arbor-v1/m6-domain-roots.txt");
+        let expected = |name: &str| {
+            vectors
+                .lines()
+                .filter_map(|line| line.split_once('='))
+                .find_map(|(key, value)| (key == name).then_some(value))
+                .unwrap()
+        };
+        for (actual, name) in [
+            (child_tx_hash, "create_tx_hash"),
+            (child_id.0, "child_domain_id"),
+            (descriptor.origin_hash, "child_origin_hash"),
+            (descriptor.joint_domain_block_hash, "child_joint"),
+            (child.block_hash, "child_genesis_block_hash"),
+            (child.header.state_root, "child_genesis_state_root"),
+            (
+                engine.finalized_state().consensus_hash,
+                "height_one_consensus_hash",
+            ),
+            (
+                engine.finalized_state().domain_heads_root(),
+                "height_one_domain_heads_root",
+            ),
+        ] {
+            assert_eq!(actual.to_string(), expected(name));
+        }
+        assert_eq!(descriptor.parent_domain_id, root);
+        assert_eq!(descriptor.joint_domain_block_hash, root_joint);
+        assert_eq!(
+            engine.finalized_state().genealogy(child_id).unwrap(),
+            vec![root, child_id]
+        );
+        let proof = engine
+            .finalized_state()
+            .domain_head_proof(child_id)
+            .unwrap();
+        proof.verify().unwrap();
+
+        // A conflicting chain ID is an ordinary status-zero EVM result: it consumes the root
+        // nonce but cannot create another domain or alter the existing descriptor.
+        let conflict = create_chain_transaction(1, root, 2_049, "Conflict");
+        let conflict_tx = arbor_codec::decode_eip1559(&conflict).unwrap();
+        let conflict_id = derive_domain_id(
+            identity().network_id,
+            root,
+            eip1559_transaction_hash(&conflict_tx).unwrap(),
+        );
+        engine.submit_raw(root, conflict).unwrap();
+        engine.produce_block(1_002).unwrap();
+        assert!(engine.finalized_state().domain(conflict_id).is_none());
+
+        // Execute a child batch in the same proposal that creates its grandchild. The joint must
+        // remain the child head captured before either batch executes.
+        let child_joint = engine
+            .finalized_state()
+            .domain(child_id)
+            .unwrap()
+            .block_hash;
+        let grandchild_envelope = create_chain_transaction(2, child_id, 2_050, "Grandchild");
+        let grandchild_tx = arbor_codec::decode_eip1559(&grandchild_envelope).unwrap();
+        let grandchild_id = derive_domain_id(
+            identity().network_id,
+            child_id,
+            eip1559_transaction_hash(&grandchild_tx).unwrap(),
+        );
+        engine.submit_raw(root, grandchild_envelope).unwrap();
+        engine
+            .submit_raw(child_id, domain_transfer(2_049, 0, 77))
+            .unwrap();
+        let proposal = engine.build_proposal(1_003).unwrap();
+        assert_eq!(engine.pending_block(proposal).unwrap().batches.len(), 2);
+        engine.commit_proposal(proposal).unwrap();
+        assert_ne!(
+            engine
+                .finalized_state()
+                .domain(child_id)
+                .unwrap()
+                .block_hash,
+            child_joint
+        );
+        assert_eq!(
+            engine
+                .finalized_state()
+                .domain_descriptor(grandchild_id)
+                .unwrap()
+                .joint_domain_block_hash,
+            child_joint
+        );
+        assert_eq!(
+            engine.finalized_state().genealogy(grandchild_id).unwrap(),
+            vec![root, child_id, grandchild_id]
+        );
+        assert_eq!(
+            engine
+                .finalized_state()
+                .domain(child_id)
+                .unwrap()
+                .state
+                .account(RECIPIENT)
+                .unwrap()
+                .unwrap()
+                .balance,
+            U256::from(77)
+        );
+
+        // A newly finalized grandchild is admitted by the mempool only from the following height.
+        engine
+            .submit_raw(grandchild_id, domain_transfer(2_050, 0, 88))
+            .unwrap();
+        engine.produce_block(1_004).unwrap();
+        assert_eq!(
+            engine
+                .finalized_state()
+                .domain(grandchild_id)
+                .unwrap()
+                .state
+                .account(RECIPIENT)
+                .unwrap()
+                .unwrap()
+                .balance,
+            U256::from(88)
+        );
+        let final_hash = engine.finalized_state().consensus_hash;
+        drop(engine);
+
+        let reopened = open_m6(dir.path());
+        assert_eq!(reopened.finalized_state().consensus_hash, final_hash);
+        assert_eq!(
+            reopened.finalized_state().genealogy(grandchild_id).unwrap(),
+            vec![root, child_id, grandchild_id]
+        );
+        let expected_descriptor = arbor_codec::encode_domain_descriptor(
+            reopened
+                .finalized_state()
+                .domain_descriptor(grandchild_id)
+                .unwrap(),
+        )
+        .unwrap();
+        drop(reopened);
+        let database = Database::open(dir.path(), identity(), RetentionPolicy::Archive).unwrap();
+        assert_eq!(
+            database.domain_registry(grandchild_id).unwrap().unwrap(),
+            expected_descriptor
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn chain_registry_enforces_governance_burn_and_owner_refund() {
+        let dir = tempdir().unwrap();
+        let governance_secret = [8_u8; 32];
+        let governance = address_for_secret(governance_secret);
+        let mut genesis = m6_genesis();
+        genesis.governance_address = governance;
+        genesis.allocations.insert(
+            governance,
+            GenesisAccount {
+                balance: U256::from(10_u128.pow(18)),
+                ..GenesisAccount::default()
+            },
+        );
+        let root = genesis.root_domain_id;
+        let database = Database::open(dir.path(), identity(), RetentionPolicy::Archive).unwrap();
+        let mut engine = SingleValidatorEngine::open(
+            EngineMode::DevValidator,
+            database,
+            genesis,
+            MempoolConfig::default(),
+        )
+        .unwrap();
+
+        let burn_create = create_chain_transaction(0, root, 2_049, "Burned");
+        let burn_tx = arbor_codec::decode_eip1559(&burn_create).unwrap();
+        let burned_id = derive_domain_id(
+            identity().network_id,
+            root,
+            eip1559_transaction_hash(&burn_tx).unwrap(),
+        );
+        let refund_create = create_chain_transaction(1, root, 2_050, "Refunded");
+        let refund_tx = arbor_codec::decode_eip1559(&refund_create).unwrap();
+        let refunded_id = derive_domain_id(
+            identity().network_id,
+            root,
+            eip1559_transaction_hash(&refund_tx).unwrap(),
+        );
+        engine.submit_raw(root, burn_create).unwrap();
+        engine.submit_raw(root, refund_create).unwrap();
+        engine.produce_block(1_001).unwrap();
+
+        // The owner cannot exercise the governance-only burn selector.
+        let unauthorized_burn =
+            lifecycle_transaction(2, encode_burn_deposit_call(burned_id), [7_u8; 32]);
+        let unauthorized_burn_hash =
+            eip1559_transaction_hash(&arbor_codec::decode_eip1559(&unauthorized_burn).unwrap())
+                .unwrap();
+        engine.submit_raw(root, unauthorized_burn).unwrap();
+        engine.produce_block(1_002).unwrap();
+        let receipt = engine.receipt(unauthorized_burn_hash).unwrap().unwrap();
+        assert!(
+            !arbor_codec::decode_eip1559_receipt(&receipt)
+                .unwrap()
+                .status
+        );
+
+        engine
+            .submit_raw(
+                root,
+                lifecycle_transaction(0, encode_burn_deposit_call(burned_id), governance_secret),
+            )
+            .unwrap();
+        engine.produce_block(1_003).unwrap();
+        let root_state = &engine.finalized_state().domain(root).unwrap().state;
+        assert_eq!(
+            root_state
+                .storage(CHAIN_REGISTRY_ADDRESS, deposit_slot(burned_id))
+                .unwrap(),
+            U256::ZERO
+        );
+        assert_eq!(
+            root_state
+                .storage(CHAIN_REGISTRY_ADDRESS, deposit_status_slot(burned_id))
+                .unwrap(),
+            U256::from(CreationDepositStatus::Burned as u8)
+        );
+        assert_eq!(
+            root_state.account(Address::ZERO).unwrap().unwrap().balance,
+            MIN_CREATION_DEPOSIT
+        );
+
+        // Creation at height one unlocks at height 101. Empty consensus blocks still advance
+        // the protocol clock; owner refund before that boundary is not accepted.
+        let early_refund =
+            lifecycle_transaction(3, encode_refund_deposit_call(refunded_id), [7_u8; 32]);
+        let early_refund_hash =
+            eip1559_transaction_hash(&arbor_codec::decode_eip1559(&early_refund).unwrap()).unwrap();
+        engine.submit_raw(root, early_refund).unwrap();
+        engine.produce_block(1_004).unwrap();
+        let receipt = engine.receipt(early_refund_hash).unwrap().unwrap();
+        assert!(
+            !arbor_codec::decode_eip1559_receipt(&receipt)
+                .unwrap()
+                .status
+        );
+        for height in 5..=100 {
+            engine.produce_block(1_000 + height).unwrap();
+        }
+        engine
+            .submit_raw(
+                root,
+                lifecycle_transaction(4, encode_refund_deposit_call(refunded_id), [7_u8; 32]),
+            )
+            .unwrap();
+        engine.produce_block(1_101).unwrap();
+        let root_state = &engine.finalized_state().domain(root).unwrap().state;
+        assert_eq!(
+            root_state
+                .storage(CHAIN_REGISTRY_ADDRESS, deposit_slot(refunded_id))
+                .unwrap(),
+            U256::ZERO
+        );
+        assert_eq!(
+            root_state
+                .storage(CHAIN_REGISTRY_ADDRESS, deposit_status_slot(refunded_id))
+                .unwrap(),
+            U256::from(CreationDepositStatus::Refunded as u8)
+        );
+    }
+
+    #[test]
+    fn local_history_selection_does_not_change_domain_validity_or_roots() {
+        let all_dir = tempdir().unwrap();
+        let root_only_dir = tempdir().unwrap();
+        let root = m6_genesis().root_domain_id;
+        let mut all = open_m6_with_history(all_dir.path(), DomainHistoryRetention::All);
+        let mut root_only = open_m6_with_history(
+            root_only_dir.path(),
+            DomainHistoryRetention::selected([root]),
+        );
+
+        let creation = create_chain_transaction(0, root, 2_049, "History");
+        let creation_tx = arbor_codec::decode_eip1559(&creation).unwrap();
+        let creation_hash = eip1559_transaction_hash(&creation_tx).unwrap();
+        let child_id = derive_domain_id(identity().network_id, root, creation_hash);
+        for engine in [&mut all, &mut root_only] {
+            engine.submit_raw(root, creation.clone()).unwrap();
+            engine.produce_block(1_001).unwrap();
+        }
+        assert_eq!(all.finalized_state(), root_only.finalized_state());
+        assert!(all.receipt(creation_hash).unwrap().is_some());
+        assert!(root_only.receipt(creation_hash).unwrap().is_some());
+
+        let child_transfer = domain_transfer(2_049, 0, 99);
+        let child_transfer_hash =
+            eip1559_transaction_hash(&arbor_codec::decode_eip1559(&child_transfer).unwrap())
+                .unwrap();
+        for engine in [&mut all, &mut root_only] {
+            engine.submit_raw(child_id, child_transfer.clone()).unwrap();
+            engine.produce_block(1_002).unwrap();
+        }
+        assert_eq!(all.finalized_state(), root_only.finalized_state());
+        assert_eq!(
+            all.finalized_state().domain_heads_root(),
+            root_only.finalized_state().domain_heads_root()
+        );
+        assert!(all.receipt(child_transfer_hash).unwrap().is_some());
+        assert!(root_only.receipt(child_transfer_hash).unwrap().is_none());
     }
 
     #[test]

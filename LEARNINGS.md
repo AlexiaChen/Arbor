@@ -221,3 +221,35 @@
 - **Evidence**: `arbor-consensus::EngineMode`, `arbor node run --dev-validator`, `scripts/check-m5-smoke.sh`.
 - **Confidence**: 10/10
 - **Action**: Do not reuse the dev engine as an M8 fallback or describe its restart/commit tests as BFT safety evidence.
+
+### L-028: [state] A storage-only native account is EIP-161 empty (2026-07-22)
+- **Issue**: The first root `ChainRegistry` genesis allocation wrote authenticated storage but used zero nonce, balance, and code, so account materialization omitted it and every parent lookup reverted.
+- **Trigger**: native precompile, genesis storage, EIP-161, ChainRegistry, empty account
+- **Pattern**: Ethereum account emptiness is determined by nonce, balance, and code hash; a non-empty storage root does not by itself keep an otherwise empty account alive. Arbor fixes the native registry genesis account nonce to 1 and reserves that invariant.
+- **Evidence**: `DevGenesis::execution_state`, `arbor-system::root_registry_genesis_storage`, M6 tree-domain integration test.
+- **Confidence**: 10/10
+- **Action**: Any future stateful native system address must have an explicit non-empty account genesis rule and a read-after-materialization test for its storage.
+
+### L-029: [domain] Capture every creation joint before proposal execution (2026-07-22)
+- **Issue**: A parent domain may execute in the same consensus block as a root transaction creating its child or grandchild.
+- **Trigger**: ChainRegistry, joint, parent batch, proposal ordering, domain activation
+- **Pattern**: `joint` comes from a proposal-start snapshot of finalized heads, never the mutable per-batch overlay. Runtime-created domains enter `domain_heads_root` when creation finalizes but are unknown to that proposal's batch validator, so their first batch is eligible only at the following height.
+- **Evidence**: `ChainRegistryExecutionContext`, `FinalizedChainState::insert_created_domain`, `m6-domain-roots.txt`.
+- **Confidence**: 10/10
+- **Action**: Do not resolve parent heads from `resulting_state` or allow same-proposal creation chains; replay and validators must use only the explicit finalized-parent snapshot.
+
+### L-030: [domain] Deposit lifecycle must share the EVM journal boundary (2026-07-22)
+- **Issue**: Creation deposits need owner refund and governance burn without allowing balance, status, and event state to diverge on failure.
+- **Trigger**: ChainRegistry, deposit, refund, burn, governance, revert
+- **Pattern**: Store an explicit `Locked/Refunded/Burned` status. Authorization and unlock-height checks happen before a journaled registry balance transfer; amount zeroing, terminal status, and event emission use the same checkpoint. Invalid, early, unauthorized, or repeated calls are ordinary status-zero EVM receipts.
+- **Evidence**: `ArborPrecompiles::run_deposit_lifecycle`, `chain_registry_enforces_governance_burn_and_owner_refund`.
+- **Confidence**: 10/10
+- **Action**: Never implement system-contract economic lifecycle as an out-of-band database mutation or split its balance and metadata commits.
+
+### L-031: [domain] Local history selection filters projections, never execution (2026-07-22)
+- **Issue**: Domain subscriptions are useful for storage/service scope but become a consensus split if they alter proposal inputs or latest state.
+- **Trigger**: node.domains, history subscription, receipt index, validator, validity
+- **Pattern**: Every validator executes every batch and persists every active domain's latest authenticated state. `all|root,<id>...` only filters rebuildable receipt and transaction-location history indexes; different selections must finalize identical chain state and roots.
+- **Evidence**: `DomainHistoryRetention`, `HistorySubscription`, `local_history_selection_does_not_change_domain_validity_or_roots`.
+- **Confidence**: 10/10
+- **Action**: Keep subscription objects out of `ChainMachine` and executor inputs; apply them only at the derived-history persistence/service edge.

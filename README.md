@@ -4,9 +4,12 @@ Arbor is an early Rust implementation of an account-based, EVM-compatible
 blockchain in which one root PoS/BFT consensus finalizes batches for a tree of
 logical domains. M0 protocol decisions, the M1 workspace baseline, M2 protocol
 types/codecs/cryptography, M3 authenticated state/storage, M4 single-domain
-EVM execution, and M5 deterministic block production/development finality are
-complete. A local development chain now runs continuously; M6 tree-domain
-creation is next.
+EVM execution, M5 deterministic block production/development finality, and M6
+tree domains are complete. M6 includes the journaled root `ChainRegistry`,
+deposit refund/burn authorization, deterministic tree-domain genesis,
+multi-domain scheduling/proofs, node-local history projection, atomic
+persistence/replay, and a dev-only two-level CLI acceptance path. General public
+RPC/CLI and production keystores remain M9 work.
 Production BFT work remains blocked by ADR-004's durable-signing gate.
 
 Read [the architecture](doc/architecture.md), [implementation plan](doc/plan.md),
@@ -14,7 +17,8 @@ and [ADRs](doc/adr/README.md) before changing protocol boundaries. M2-M4
 consensus-, state-, execution-, and block-sensitive crates are recorded in
 [protocol dependencies](doc/protocol/dependencies.md); fixed M4 rules are in
 [the execution protocol](doc/protocol/execution.md), and fixed M5 rules are in
-[the block protocol](doc/protocol/blocks.md).
+[the block protocol](doc/protocol/blocks.md). M6 rules are fixed in [the domain
+protocol](doc/protocol/domains.md).
 
 ## Workspace checks
 
@@ -24,6 +28,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 bash scripts/check-m1-smoke.sh
 bash scripts/check-m5-smoke.sh
+bash scripts/check-m6-smoke.sh
 ```
 
 CI additionally runs `cargo nextest`, `cargo deny`, documentation-link checks,
