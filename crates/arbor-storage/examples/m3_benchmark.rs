@@ -85,6 +85,7 @@ fn batch(height: u64, domain_id: DomainId, snapshot: arbor_state::TrieSnapshot) 
     });
     batch.states.push(DomainStateCommit {
         domain_id,
+        consensus_height: height,
         snapshot,
     });
     batch

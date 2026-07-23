@@ -7,6 +7,29 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[dependencies]
+alloy-primitives.workspace = true
+arbor-chain = { path = "../arbor-chain", version = "0.1.0" }
+arbor-codec = { path = "../arbor-codec", version = "0.1.0" }
+arbor-crypto = { path = "../arbor-crypto", version = "0.1.0" }
+arbor-evm = { path = "../arbor-evm", version = "0.1.0" }
+arbor-primitives = { path = "../arbor-primitives", version = "0.1.0" }
+arbor-state = { path = "../arbor-state", version = "0.1.0" }
+futures.workspace = true
+libp2p.workspace = true
+mdns-sd.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+arbor-consensus = { path = "../arbor-consensus", version = "0.1.0" }
+arbor-mempool = { path = "../arbor-mempool", version = "0.1.0" }
+arbor-storage = { path = "../arbor-storage", version = "0.1.0" }
+arbor-system = { path = "../arbor-system", version = "0.1.0" }
+k256.workspace = true
+tempfile.workspace = true
+
 [lints]
 workspace = true
-

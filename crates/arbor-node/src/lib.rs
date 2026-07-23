@@ -7,6 +7,7 @@
 
 mod config;
 mod error;
+mod networked;
 mod shutdown;
 mod supervisor;
 
@@ -15,7 +16,7 @@ pub use error::{ErrorClass, NodeError};
 pub use shutdown::{Shutdown, ShutdownTrigger};
 pub use supervisor::{Supervisor, SupervisorError};
 
-use std::{path::Path, time::Duration};
+use std::path::Path;
 
 use alloy_primitives::keccak256;
 use arbor_consensus::{
@@ -58,6 +59,8 @@ pub fn open_database(data_dir: &Path) -> Result<Database, StorageError> {
 /// Returns [`DevNodeError`] for genesis, storage, or replay inconsistency.
 pub fn initialize_dev_chain(data_dir: &Path) -> Result<(), DevNodeError> {
     open_dev_engine(data_dir, &HistorySubscription::All)?;
+    arbor_network::load_or_create_peer_identity(data_dir.join("network/peer.key"))
+        .map_err(|error| DevNodeError::Network(error.to_string()))?;
     Ok(())
 }
 
@@ -100,27 +103,24 @@ pub fn open_dev_engine(
 pub async fn run_dev_validator(
     data_dir: &Path,
     history: HistorySubscription,
+    network: NetworkConfig,
     mut shutdown: Shutdown,
 ) -> Result<(), DevNodeError> {
-    let mut engine = open_dev_engine(data_dir, &history)?;
-    let mut interval = tokio::time::interval(Duration::from_millis(250));
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    loop {
-        tokio::select! {
-            () = shutdown.cancelled() => return Ok(()),
-            _instant = interval.tick() => {
-                let timestamp = engine.finalized_state().timestamp.checked_add(1)
-                    .ok_or(DevNodeError::TimestampOverflow)?;
-                let event = engine.produce_block(timestamp)?;
-                tracing::info!(
-                    height = event.height,
-                    consensus_hash = %event.consensus_hash,
-                    domain_heads_root = %event.domain_heads_root,
-                    "finalized development block"
-                );
-            }
-        }
-    }
+    networked::run_dev_node(data_dir, history, network, true, &mut shutdown).await
+}
+
+/// Runs a development full listener that only imports finalized snapshot/block sync.
+///
+/// # Errors
+///
+/// Returns [`DevNodeError`] for database, network, snapshot, or block-import failure.
+pub async fn run_dev_listener(
+    data_dir: &Path,
+    history: HistorySubscription,
+    network: NetworkConfig,
+    mut shutdown: Shutdown,
+) -> Result<(), DevNodeError> {
+    networked::run_dev_node(data_dir, history, network, false, &mut shutdown).await
 }
 
 /// Development node assembly failure.
@@ -135,6 +135,9 @@ pub enum DevNodeError {
     /// Consensus timestamp space is exhausted.
     #[error("development consensus timestamp overflow")]
     TimestampOverflow,
+    /// P2P assembly, identity, synchronization, or protocol handling failed.
+    #[error("development network failure: {0}")]
+    Network(String),
 }
 
 /// Installs process-wide structured logging.

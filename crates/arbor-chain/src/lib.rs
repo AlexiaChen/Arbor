@@ -24,6 +24,7 @@ use arbor_primitives::{
     PROTOCOL_VERSION,
 };
 use arbor_state::{DomainHead, DomainHeadProof, DomainHeadsCommitment};
+use arbor_system::{CHAIN_REGISTRY_ADDRESS, descriptor_slot};
 use thiserror::Error;
 
 /// Maximum execution gas consumed across all batches in one consensus block.
@@ -131,6 +132,53 @@ pub struct FinalizedChainState {
     domains: BTreeMap<DomainId, FinalizedDomain>,
     descriptors: BTreeMap<DomainId, DomainDescriptor>,
 }
+
+/// One executable domain recovered from an authenticated state checkpoint.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FinalizedDomainCheckpoint {
+    /// Domain identifier; entries must be strictly sorted by this field.
+    pub domain_id: DomainId,
+    /// Immutable execution parameters.
+    pub config: DomainConfig,
+    /// Latest finalized domain header.
+    pub header: DomainBlockHeader,
+    /// Canonical hash of `header`.
+    pub block_hash: B256,
+    /// Fully verified executable state reconstructed from content-addressed chunks.
+    pub state: ExecutionState,
+    /// Runtime-created descriptor. The root domain is the only entry without one.
+    pub descriptor: Option<DomainDescriptor>,
+}
+
+/// Complete application state recovered at one finalized root-consensus checkpoint.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FinalizedChainCheckpoint {
+    /// Genesis-bound network identifier.
+    pub network_id: NetworkId,
+    /// Finalized checkpoint height.
+    pub height: ConsensusHeight,
+    /// Finalized consensus hash at `height`.
+    pub consensus_hash: B256,
+    /// Finalized consensus timestamp.
+    pub timestamp: u64,
+    /// Current validator-set commitment.
+    pub validator_set_hash: B256,
+    /// Next validator-set commitment.
+    pub next_validator_set_hash: B256,
+    /// Immutable root domain.
+    pub root_domain_id: DomainId,
+    /// Genesis-bound root governance address.
+    pub governance_address: Address,
+    /// Sparse commitment to every domain head.
+    pub domain_heads_root: B256,
+    /// Strictly sorted complete active-domain set.
+    pub domains: Vec<FinalizedDomainCheckpoint>,
+}
+
+type ReconstructedCheckpoint = (
+    BTreeMap<DomainId, FinalizedDomain>,
+    BTreeMap<DomainId, DomainDescriptor>,
+);
 
 impl FinalizedChainState {
     /// Creates height-zero state with one root EVM domain.
@@ -310,6 +358,92 @@ impl FinalizedChainState {
         heads_commitment(&self.domains).root()
     }
 
+    /// Materializes the current finalized view for a checkpoint producer.
+    #[must_use]
+    pub fn checkpoint(&self) -> FinalizedChainCheckpoint {
+        FinalizedChainCheckpoint {
+            network_id: self.network_id,
+            height: self.height,
+            consensus_hash: self.consensus_hash,
+            timestamp: self.timestamp,
+            validator_set_hash: self.validator_set_hash,
+            next_validator_set_hash: self.next_validator_set_hash,
+            root_domain_id: self.root_domain_id,
+            governance_address: self.governance_address,
+            domain_heads_root: self.domain_heads_root(),
+            domains: self
+                .domains
+                .iter()
+                .map(|(domain_id, domain)| FinalizedDomainCheckpoint {
+                    domain_id: *domain_id,
+                    config: domain.config,
+                    header: domain.header.clone(),
+                    block_hash: domain.block_hash,
+                    state: domain.state.clone(),
+                    descriptor: self.descriptors.get(domain_id).cloned(),
+                })
+                .collect(),
+        }
+    }
+
+    /// Reconstructs a finalized view after independently verified snapshot chunks were decoded.
+    ///
+    /// This validates every domain header/state pair, the sparse domain-head commitment, runtime
+    /// genealogy, unique chain IDs, and each descriptor hash committed in the authenticated root
+    /// `ChainRegistry` storage. No caller-supplied query projection becomes protocol truth.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ChainError`] for any incomplete, non-canonical, or unauthenticated checkpoint.
+    pub fn from_checkpoint(checkpoint: FinalizedChainCheckpoint) -> Result<Self, ChainError> {
+        if checkpoint.height.0 == 0 {
+            return Err(ChainError::Checkpoint("checkpoint height must be non-zero"));
+        }
+        if checkpoint.domains.is_empty() {
+            return Err(ChainError::Checkpoint("checkpoint has no domains"));
+        }
+        if checkpoint
+            .domains
+            .windows(2)
+            .any(|pair| pair[0].domain_id >= pair[1].domain_id)
+        {
+            return Err(ChainError::Checkpoint(
+                "checkpoint domains are not strictly sorted",
+            ));
+        }
+
+        let (domains, descriptors) = reconstruct_checkpoint_domains(
+            checkpoint.network_id,
+            checkpoint.root_domain_id,
+            checkpoint.height,
+            checkpoint.domains,
+        )?;
+        let root = domains
+            .get(&checkpoint.root_domain_id)
+            .ok_or(ChainError::Checkpoint("root domain is missing"))?;
+        validate_checkpoint_descriptors(root, &domains, &descriptors)?;
+
+        let state = Self {
+            network_id: checkpoint.network_id,
+            height: checkpoint.height,
+            consensus_hash: checkpoint.consensus_hash,
+            timestamp: checkpoint.timestamp,
+            validator_set_hash: checkpoint.validator_set_hash,
+            next_validator_set_hash: checkpoint.next_validator_set_hash,
+            root_domain_id: checkpoint.root_domain_id,
+            governance_address: checkpoint.governance_address,
+            domains,
+            descriptors,
+        };
+        if state.domain_heads_root() != checkpoint.domain_heads_root {
+            return Err(ChainError::Checkpoint("domain-head root mismatch"));
+        }
+        for domain_id in state.descriptors.keys().copied() {
+            state.genealogy(domain_id)?;
+        }
+        Ok(state)
+    }
+
     fn insert_created_domain(
         &mut self,
         created: &CreatedDomain,
@@ -380,6 +514,112 @@ impl FinalizedChainState {
             .insert(descriptor.domain_id, descriptor.clone());
         Ok(())
     }
+}
+
+fn reconstruct_checkpoint_domains(
+    network_id: NetworkId,
+    root_domain_id: DomainId,
+    height: ConsensusHeight,
+    entries: Vec<FinalizedDomainCheckpoint>,
+) -> Result<ReconstructedCheckpoint, ChainError> {
+    let mut domains = BTreeMap::new();
+    let mut descriptors = BTreeMap::new();
+    let mut chain_ids = BTreeSet::new();
+    for entry in entries {
+        entry.config.validate()?;
+        if entry.header.domain_id != entry.domain_id
+            || entry.header.state_root != entry.state.state_root()
+            || entry.header.consensus_height.0 > height.0
+            || entry.header.gas_limit != entry.config.gas_limit
+            || domain_header_hash(&entry.header).map_err(ChainError::hash)? != entry.block_hash
+        {
+            return Err(ChainError::Checkpoint(
+                "domain header, state, config, or hash mismatch",
+            ));
+        }
+        if !chain_ids.insert(entry.config.chain_id) {
+            return Err(ChainError::Checkpoint("duplicate checkpoint chain ID"));
+        }
+        match (entry.domain_id == root_domain_id, entry.descriptor) {
+            (true, None) => {}
+            (true, Some(_)) => {
+                return Err(ChainError::Checkpoint(
+                    "root domain must not have a runtime descriptor",
+                ));
+            }
+            (false, Some(descriptor)) => {
+                validate_checkpoint_descriptor(
+                    network_id,
+                    entry.domain_id,
+                    entry.config,
+                    &descriptor,
+                )?;
+                descriptors.insert(entry.domain_id, descriptor);
+            }
+            (false, None) => {
+                return Err(ChainError::Checkpoint(
+                    "runtime domain descriptor is missing",
+                ));
+            }
+        }
+        domains.insert(
+            entry.domain_id,
+            FinalizedDomain {
+                config: entry.config,
+                header: entry.header,
+                block_hash: entry.block_hash,
+                state: entry.state,
+            },
+        );
+    }
+    Ok((domains, descriptors))
+}
+
+fn validate_checkpoint_descriptor(
+    network_id: NetworkId,
+    domain_id: DomainId,
+    config: DomainConfig,
+    descriptor: &DomainDescriptor,
+) -> Result<(), ChainError> {
+    if descriptor.domain_id != domain_id
+        || descriptor.status != DomainStatus::Active
+        || descriptor.evm_chain_id != config.chain_id
+        || descriptor.protocol_revision != config.protocol_revision
+        || descriptor.gas_limit != config.gas_limit
+        || descriptor.initial_base_fee != config.initial_base_fee_per_gas
+        || derive_domain_id(
+            network_id,
+            descriptor.parent_domain_id,
+            descriptor.create_tx_hash,
+        ) != domain_id
+    {
+        return Err(ChainError::Checkpoint("runtime domain descriptor mismatch"));
+    }
+    Ok(())
+}
+
+fn validate_checkpoint_descriptors(
+    root: &FinalizedDomain,
+    domains: &BTreeMap<DomainId, FinalizedDomain>,
+    descriptors: &BTreeMap<DomainId, DomainDescriptor>,
+) -> Result<(), ChainError> {
+    for (domain_id, descriptor) in descriptors {
+        if !domains.contains_key(&descriptor.parent_domain_id) {
+            return Err(ChainError::Checkpoint("descriptor parent is missing"));
+        }
+        let encoded =
+            arbor_codec::encode_domain_descriptor(descriptor).map_err(ChainError::hash)?;
+        let committed = root
+            .state
+            .storage(CHAIN_REGISTRY_ADDRESS, descriptor_slot(*domain_id))
+            .map_err(ChainError::hash)?;
+        if committed != U256::from_be_slice(keccak256(encoded).as_slice()) {
+            return Err(ChainError::Checkpoint(
+                "descriptor is not committed by root ChainRegistry",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_domain_genesis(
@@ -633,6 +873,9 @@ pub enum ChainError {
     /// Root-registry projection disagrees with authenticated execution output.
     #[error("ChainRegistry invariant failed: {0}")]
     RegistryInvariant(&'static str),
+    /// A state-sync checkpoint is incomplete or disagrees with authenticated protocol state.
+    #[error("invalid finalized checkpoint: {0}")]
+    Checkpoint(&'static str),
     /// Proposal does not extend the current finalized consensus head.
     #[error("consensus parent/height does not extend the finalized head")]
     WrongConsensusParent,

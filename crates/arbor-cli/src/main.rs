@@ -13,7 +13,7 @@ use arbor_codec::{encode_eip1559, encode_eip1559_signing_payload};
 use arbor_crypto::{derive_domain_id, eip1559_transaction_hash};
 use arbor_node::{
     Config, Supervisor, init_tracing, initialize_dev_chain, open_database, open_dev_engine,
-    run_dev_validator,
+    run_dev_listener, run_dev_validator,
 };
 use arbor_primitives::{DomainId, Eip1559Transaction};
 use arbor_system::{
@@ -186,8 +186,15 @@ async fn run(data_dir: PathBuf, dev_validator: bool) -> Result<(), CliError> {
     let mut shutdown = supervisor.shutdown_signal();
     if dev_validator {
         let history = config.node.domains.clone();
+        let network = config.network.clone();
         supervisor.spawn("dev-validator", async move {
-            run_dev_validator(&data_dir, history, shutdown).await
+            run_dev_validator(&data_dir, history, network, shutdown).await
+        });
+    } else if config.node.dev {
+        let history = config.node.domains.clone();
+        let network = config.network.clone();
+        supervisor.spawn("dev-listener", async move {
+            run_dev_listener(&data_dir, history, network, shutdown).await
         });
     } else {
         supervisor.spawn("node-placeholder", async move {

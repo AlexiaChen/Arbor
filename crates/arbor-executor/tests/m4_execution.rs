@@ -418,6 +418,7 @@ fn fixed_block_survives_durable_restart_with_identical_roots() {
     });
     batch.states.push(DomainStateCommit {
         domain_id: domain(),
+        consensus_height: 1,
         snapshot: result.state.snapshot().clone(),
     });
     batch.contract_code = result.state.contract_code().clone();

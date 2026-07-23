@@ -15,6 +15,7 @@ arbor-evm = { path = "../arbor-evm", version = "0.1.0" }
 arbor-executor = { path = "../arbor-executor", version = "0.1.0" }
 arbor-primitives = { path = "../arbor-primitives", version = "0.1.0" }
 arbor-state = { path = "../arbor-state", version = "0.1.0" }
+arbor-system = { path = "../arbor-system", version = "0.1.0" }
 thiserror.workspace = true
 
 [dev-dependencies]

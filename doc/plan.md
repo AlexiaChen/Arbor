@@ -1,6 +1,6 @@
 # Arbor Rust 实施规划
 
-## 当前状态（2026-07-22）
+## 当前状态（2026-07-23）
 
 - M0：完成。ADR-001 至 005 均已形成接受决策；ADR-003 选择 Ethereum MPT + parity-db 并通过增量节点、历史 proof、裁剪、崩溃边界和 10 万账户基准；ADR-004 因两个候选均违反 pre-sign durable-state 门槛而拒绝其原生生产使用，并完成规定的最小安全规格与四验证者穷举模型。M8 保持阻塞，直到安全 adapter/候选版本通过真实四进程故障套件。
 - M1：完成并复验。Rust 2024/stable workspace、17 个架构 crate、单一 `arbor` 入口、配置/错误分类/tracing/任务监督/graceful shutdown、`arbor-testkit` 与 CI 门禁已落地；CLI smoke gate 覆盖 `node init`、`db inspect` 和 SIGTERM graceful shutdown，交互式 Ctrl-C 使用同一关闭路径。
@@ -9,7 +9,8 @@
 - M4：完成。`revm` 41.0.0 精确锁定，protocol revision 1 固定 Shanghai；authenticated account/storage adapter、EIP-1559 batch、native protocol-info precompile、receipt/logs bloom/ordered trie roots、revert/OOG/fee/refund 语义、per-domain mempool 和 parity-db 重启向量已落地。
 - M5：完成。`ConsensusBlock`/domain block 的确定性构造与完整重放校验、二进制 collection roots、时间/base-fee/资源限制、proposal overlay/mempool 回补、同步 parity-db 原子提交、finalized event、开发 genesis validator 和显式 `--dev-validator` 连续出块已落地；固定 transfer 可在提交前保持不可见、提交后查询 receipt，并在重启后得到相同 head/state/WAL。
 - M6：完成。root-only `ChainRegistry` 创建与 refund/burn 治理状态机、确定性 ID/origin/joint、隔离 child genesis、树形 descriptor/genealogy、domain head/result proof、多 domain mempool 与公平 dev scheduler、`node.domains` 本地历史投影、parity-db 原子投影和重启重放均已落地；dev-only CLI 已完成两层建链、双 domain 合约部署和同一 finalized block proof 验收。通用公开 RPC/CLI 与生产 keystore 仍属于 M9。
-- M7 及以后：未开始。M8 仍不得绕过 ADR-004 的重新接受条件固化 BFT 生产依赖。
+- M7：完成（development finality 边界）。独立持久 peer identity、network/genesis handshake、identify/ping/Kademlia、安全 `mdns-sd` LAN 发现、transaction/finalized gossip、有界 direct/consensus mailbox、peer score 和指标已装配进 node/CLI；header/finality、body、checkpoint snapshot/state、domain history 四级同步均已落地。多 domain 快照会验证 validator set、finality adapter、完整 domain head proofs、manifest/chunks、trie/code/state roots，并在一次 parity-db transaction 后才发布 finalized marker。真实 listener 验收覆盖空库追赶、快照+增量、超时/乱序/重复/篡改/超大输入、慢消费者、断线重启和所有 domain roots 一致。这里的空 finality proof 仅属于 `SingleValidatorEngine` development adapter，不是 QC/BFT 证据，不解除 M8/ADR-004 阻塞。
+- M8 及以后：未开始。M8 仍不得绕过 ADR-004 的重新接受条件固化 BFT 生产依赖。
 
 ## 1. 交付目标
 
@@ -221,6 +222,12 @@ arbor node run --dev-validator --data-dir ./tmp/node1
 验收：CLI 创建两层子链，在 child 和 grandchild 分别部署合约；每个 domain 的 inclusion proof 可验证到同一 finalized consensus block。
 
 ### M7：libp2p、block sync 与 state sync
+
+完成记录：[M7 network and block-sync protocol](protocol/network.md)；
+`scripts/check-m7-smoke.sh` 执行真实 loopback listener、多 domain
+block/snapshot sync、断线重启追赶和 durable reopen 验收。
+`SingleValidatorEngine` 的显式空 proof 只用于 development sync，不是 QC
+或 BFT finality；M8 仍受 ADR-004 硬边界约束。
 
 交付：
 

@@ -99,6 +99,8 @@ pub struct FinalizedMarker {
 pub struct DomainStateCommit {
     /// Domain whose state advances.
     pub domain_id: DomainId,
+    /// Consensus height of this domain's latest logical header.
+    pub consensus_height: u64,
     /// Fully materialized authenticated state snapshot.
     pub snapshot: TrieSnapshot,
 }
@@ -305,9 +307,13 @@ impl Database {
         let mut pending_node_hashes = BTreeSet::new();
 
         for state in &batch.states {
+            if state.consensus_height > batch.marker.height {
+                return Err(StorageError::CorruptMetadata(
+                    "domain state height exceeds finalized marker",
+                ));
+            }
             self.append_state_changes(
                 state,
-                batch.marker.height,
                 &mut transaction,
                 &mut pending_node_hashes,
                 &mut stats,
@@ -363,7 +369,6 @@ impl Database {
     fn append_state_changes(
         &self,
         state: &DomainStateCommit,
-        height: u64,
         transaction: &mut DbTransaction,
         pending_node_hashes: &mut BTreeSet<B256>,
         write_stats: &mut CommitStats,
@@ -418,18 +423,18 @@ impl Database {
         transaction.extend([
             (
                 COLUMN_META,
-                root_key(state.domain_id, height),
+                root_key(state.domain_id, state.consensus_height),
                 Some(state.snapshot.root().to_vec()),
             ),
             (
                 COLUMN_META,
-                manifest_key(state.domain_id, height),
+                manifest_key(state.domain_id, state.consensus_height),
                 Some(manifest.encode()?),
             ),
             (
                 COLUMN_META,
                 head_key(state.domain_id),
-                Some(encode_head(height, state.snapshot.root())),
+                Some(encode_head(state.consensus_height, state.snapshot.root())),
             ),
         ]);
         Ok(())
@@ -1162,6 +1167,7 @@ mod tests {
         let mut batch = CommitBatch::new(marker(height));
         batch.states.push(DomainStateCommit {
             domain_id: domain(),
+            consensus_height: height,
             snapshot: state,
         });
         batch

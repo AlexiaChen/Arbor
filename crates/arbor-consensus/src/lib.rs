@@ -5,6 +5,8 @@
 
 #![forbid(unsafe_code)]
 
+mod checkpoint;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
@@ -25,10 +27,13 @@ use arbor_system::{CHAIN_REGISTRY_ADDRESS, root_registry_genesis_storage};
 use thiserror::Error;
 use tokio::sync::broadcast;
 
+pub use checkpoint::DevelopmentCheckpoint;
+
 const DEV_GENESIS_TAG: &[u8] = b"ARBOR_DEV_GENESIS_RECORD_V1";
 const DEV_WAL_TAG: &[u8] = b"ARBOR_DEV_COMMIT_WAL_V1";
 const KEY_DEV_GENESIS: &[u8] = b"m5:dev:genesis";
 const KEY_DEV_WAL: &[u8] = b"m5:dev:wal";
+const KEY_DEV_CHECKPOINT: &[u8] = b"m7:dev:checkpoint";
 const PREFIX_BLOCK: &[u8] = b"m5:block:";
 const PREFIX_RECEIPT: &[u8] = b"m5:receipt:";
 const PREFIX_TX_LOCATION: &[u8] = b"m5:tx:";
@@ -361,7 +366,17 @@ impl SingleValidatorEngine {
                 if stored.as_slice() != fingerprint.as_slice() {
                     return Err(ConsensusError::GenesisMismatch);
                 }
-                for height in 1..=marker.height {
+                if let Some(checkpoint) =
+                    checkpoint::load_development_checkpoint(&database, &genesis)?
+                {
+                    if checkpoint.state.height.0 > marker.height {
+                        return Err(ConsensusError::InconsistentStore(
+                            "checkpoint height exceeds finalized marker",
+                        ));
+                    }
+                    finalized = checkpoint.state;
+                }
+                for height in finalized.height.0.saturating_add(1)..=marker.height {
                     let bytes = database.index(&block_key(height))?.ok_or(
                         ConsensusError::InconsistentStore("missing finalized block body"),
                     )?;
@@ -402,6 +417,29 @@ impl SingleValidatorEngine {
     /// Returns [`ConsensusError`] if marker bytes are corrupt.
     pub fn finalized_marker(&self) -> Result<Option<FinalizedMarker>, ConsensusError> {
         Ok(self.database.finalized_marker()?)
+    }
+
+    /// Loads one locally finalized block body for M7 block sync serving.
+    ///
+    /// Height zero is represented by the configured genesis identity and has no encoded block
+    /// body. A missing height inside the finalized range is treated as database inconsistency.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConsensusError`] for corrupt storage or a malformed persisted block.
+    pub fn finalized_block(&self, height: u64) -> Result<Option<ConsensusBlock>, ConsensusError> {
+        if height == 0 || height > self.finalized.height.0 {
+            return Ok(None);
+        }
+        let Some(bytes) = self.database.index(&block_key(height))? else {
+            if checkpoint::checkpoint_height(&self.database)?.is_some_and(|base| height <= base) {
+                return Ok(None);
+            }
+            return Err(ConsensusError::InconsistentStore(
+                "missing finalized block body",
+            ));
+        };
+        Ok(Some(decode_consensus_block(&bytes)?))
     }
 
     /// Subscribes to stable finalized commit events.
@@ -531,45 +569,35 @@ impl SingleValidatorEngine {
         let Some(pending) = self.pending.take() else {
             return Err(ConsensusError::UnknownProposal);
         };
-        let created_domains = pending
-            .proposal
-            .executions()
-            .iter()
-            .flat_map(|execution| &execution.created_domains)
-            .map(|created| {
-                (
-                    created.descriptor.domain_id,
-                    created.descriptor.evm_chain_id,
-                )
-            })
-            .collect::<Vec<_>>();
-        let mut next_mempool = self.mempool.clone();
-        for (domain_id, chain_id) in &created_domains {
-            if let Err(error) = next_mempool.register_domain(*domain_id, *chain_id) {
-                self.pending = Some(pending);
-                return Err(error.into());
-            }
-        }
-        let commit = proposal_commit_batch(&pending.proposal, &self.history_retention)?;
-        let stats = match self.database.commit(commit) {
+        let stats = match self.commit_validated(&pending.proposal) {
             Ok(stats) => stats,
             Err(error) => {
                 self.pending = Some(pending);
-                return Err(error.into());
+                return Err(error);
             }
         };
-        let (_, finalized, _) = pending.proposal.into_parts();
-        self.finalized = finalized;
-        self.mempool = next_mempool;
-        self.scheduler_cursor =
-            self.scheduler_cursor.saturating_add(1) % self.finalized.domains().count().max(1);
-        let event = CommitEvent {
-            height: self.finalized.height.0,
-            consensus_hash: self.finalized.consensus_hash,
-            domain_heads_root: self.finalized.domain_heads_root(),
-        };
-        let _ = self.events.send(event);
         Ok(stats)
+    }
+
+    /// Replays and durably imports one externally obtained next-height block in development mode.
+    ///
+    /// This method verifies every consensus header, collection root, domain parent, transaction,
+    /// execution result, and resulting state root against the local finalized parent before the
+    /// parity-db transaction is built. It does not prove production finality: the M7 sync adapter
+    /// must first apply its selected finality verifier, and M8 must supply the accepted BFT proof.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed validation/storage error without publishing an invalid finalized view.
+    pub fn import_development_finalized_block(
+        &mut self,
+        block: &ConsensusBlock,
+    ) -> Result<CommitStats, ConsensusError> {
+        if self.pending.is_some() {
+            return Err(ConsensusError::ProposalPending);
+        }
+        let proposal = ChainMachine.validate_proposal(&self.finalized, block)?;
+        self.commit_validated(&proposal)
     }
 
     /// Builds and immediately commits one development block.
@@ -596,10 +624,91 @@ impl SingleValidatorEngine {
         Ok(self.database.receipt(&receipt_key(transaction_hash))?)
     }
 
+    /// Serves a bounded node-local projection of finalized domain headers.
+    ///
+    /// This history is never an input to proposal validation. A node that did not retain the
+    /// selected domain, or imported a checkpoint without older bodies, returns only locally
+    /// available records.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage or canonical encoding error.
+    pub fn domain_history(
+        &self,
+        domain_id: DomainId,
+        start_number: u64,
+        limit: usize,
+    ) -> Result<Vec<Vec<u8>>, ConsensusError> {
+        if limit == 0 || !self.history_retention.retains(domain_id) {
+            return Ok(Vec::new());
+        }
+        let mut records = Vec::new();
+        for height in 1..=self.finalized.height.0 {
+            let Some(block) = self.finalized_block(height)? else {
+                continue;
+            };
+            for header in block
+                .domain_blocks
+                .iter()
+                .filter(|header| header.domain_id == domain_id && header.number.0 >= start_number)
+            {
+                records.push(
+                    arbor_codec::encode_domain_header(header)
+                        .map_err(|error| ConsensusError::InvalidGenesisOwned(error.to_string()))?,
+                );
+                if records.len() == limit {
+                    return Ok(records);
+                }
+            }
+        }
+        Ok(records)
+    }
+
     /// Number of unreserved local transactions.
     #[must_use]
     pub fn mempool_len(&self) -> usize {
         self.mempool.len()
+    }
+
+    fn commit_validated(
+        &mut self,
+        proposal: &ValidatedProposal,
+    ) -> Result<CommitStats, ConsensusError> {
+        let created_domains = proposal
+            .executions()
+            .iter()
+            .flat_map(|execution| &execution.created_domains)
+            .map(|created| {
+                (
+                    created.descriptor.domain_id,
+                    created.descriptor.evm_chain_id,
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut next_mempool = self.mempool.clone();
+        for (domain_id, chain_id) in &created_domains {
+            next_mempool.register_domain(*domain_id, *chain_id)?;
+        }
+        let included_hashes = proposal
+            .executions()
+            .iter()
+            .flat_map(|execution| &execution.transactions)
+            .map(|transaction| transaction.transaction_hash)
+            .collect::<BTreeSet<_>>();
+        drop(next_mempool.reserve_hashes(&included_hashes));
+        let commit = proposal_commit_batch(proposal, &self.history_retention)?;
+        let stats = self.database.commit(commit)?;
+        self.finalized = proposal.resulting_state().clone();
+        self.mempool = next_mempool;
+        self.scheduler_cursor =
+            self.scheduler_cursor.saturating_add(1) % self.finalized.domains().count().max(1);
+        let event = CommitEvent {
+            height: self.finalized.height.0,
+            consensus_hash: self.finalized.consensus_hash,
+            domain_heads_root: self.finalized.domain_heads_root(),
+        };
+        let _ = self.events.send(event);
+        Ok(stats)
     }
 
     fn select_transactions(&self) -> Result<Vec<PoolEntry>, ConsensusError> {
@@ -679,6 +788,7 @@ fn initialize_database(
     let mut commit = CommitBatch::new(marker);
     commit.states.push(DomainStateCommit {
         domain_id: genesis.root_domain_id,
+        consensus_height: domain.header.consensus_height.0,
         snapshot: domain.state.snapshot().clone(),
     });
     commit.contract_code = domain.state.contract_code().clone();
@@ -758,6 +868,7 @@ fn proposal_commit_batch(
     {
         commit.states.push(DomainStateCommit {
             domain_id: domain_header.domain_id,
+            consensus_height: domain_header.consensus_height.0,
             snapshot: execution.state.snapshot().clone(),
         });
         commit
@@ -789,6 +900,7 @@ fn proposal_commit_batch(
         for created in &execution.created_domains {
             commit.states.push(DomainStateCommit {
                 domain_id: created.descriptor.domain_id,
+                consensus_height: block.header.height.0,
                 snapshot: created.genesis_state.snapshot().clone(),
             });
             commit
@@ -1229,6 +1341,46 @@ mod tests {
             U256::from(123)
         );
         assert!(reopened.receipt(transaction_hash).unwrap().is_some());
+    }
+
+    #[test]
+    fn development_block_import_replays_before_durable_publication() {
+        let source_dir = tempdir().unwrap();
+        let target_dir = tempdir().unwrap();
+        let mut source = open(source_dir.path());
+        source
+            .submit_raw(genesis().root_domain_id, signed_transfer())
+            .unwrap();
+        source.produce_block(1_001).unwrap();
+        let block = source.finalized_block(1).unwrap().unwrap();
+
+        let mut target = open(target_dir.path());
+        target
+            .submit_raw(genesis().root_domain_id, signed_transfer())
+            .unwrap();
+        assert_eq!(target.mempool_len(), 1);
+        let mut invalid = block.clone();
+        invalid.header.domain_heads_root.0[0] ^= 1;
+        assert!(target.import_development_finalized_block(&invalid).is_err());
+        assert_eq!(target.finalized_marker().unwrap().unwrap().height, 0);
+        assert!(
+            target
+                .finalized_state()
+                .domain(genesis().root_domain_id)
+                .unwrap()
+                .state
+                .account(RECIPIENT)
+                .unwrap()
+                .is_none()
+        );
+
+        target.import_development_finalized_block(&block).unwrap();
+        assert_eq!(target.mempool_len(), 0);
+        assert_eq!(target.finalized_state(), source.finalized_state());
+        assert_eq!(target.finalized_block(1).unwrap(), Some(block));
+        drop(target);
+        let reopened = open(target_dir.path());
+        assert_eq!(reopened.finalized_state(), source.finalized_state());
     }
 
     #[test]

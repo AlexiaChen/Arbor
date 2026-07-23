@@ -113,6 +113,12 @@ fn parse_history_subscription(value: &str) -> Result<HistorySubscription, &'stat
 pub struct NetworkConfig {
     /// P2P listen address. Port zero asks the OS for an ephemeral port.
     pub listen_addr: SocketAddr,
+    /// Enables same-LAN discovery through the safe mDNS adapter.
+    #[serde(default = "default_true")]
+    pub mdns: bool,
+    /// Explicit reconnecting peers in `<peer-id>@<multiaddr>` form.
+    #[serde(default)]
+    pub persistent_peers: Vec<String>,
 }
 
 impl Default for Config {
@@ -126,6 +132,8 @@ impl Default for Config {
             },
             network: NetworkConfig {
                 listen_addr: "127.0.0.1:0".parse().expect("literal address is valid"),
+                mdns: true,
+                persistent_peers: Vec::new(),
             },
         }
     }
@@ -178,6 +186,14 @@ impl Config {
         if self.node.moniker.trim().is_empty() {
             return Err(ConfigError::EmptyMoniker);
         }
+        let mut peers = BTreeSet::new();
+        for value in &self.network.persistent_peers {
+            let peer = arbor_network::PersistentPeer::from_str(value)
+                .map_err(|error| ConfigError::PersistentPeer(error.to_string()))?;
+            if !peers.insert(peer.peer_id) {
+                return Err(ConfigError::DuplicatePersistentPeer);
+            }
+        }
         Ok(())
     }
 }
@@ -210,6 +226,16 @@ pub enum ConfigError {
     /// Moniker must contain a non-whitespace character.
     #[error("node.moniker must not be empty")]
     EmptyMoniker,
+    /// One persistent peer entry is malformed.
+    #[error("invalid network.persistent_peers entry: {0}")]
+    PersistentPeer(String),
+    /// The same peer identity appears more than once.
+    #[error("network.persistent_peers contains a duplicate peer ID")]
+    DuplicatePersistentPeer,
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 #[cfg(test)]
@@ -272,5 +298,15 @@ mod tests {
                 Err(ConfigError::Decode(_))
             ));
         }
+    }
+
+    #[test]
+    fn persistent_peer_syntax_is_validated() {
+        let mut config = Config::default();
+        config.network.persistent_peers = vec!["bad".to_owned()];
+        assert!(matches!(
+            Config::from_toml(&config.to_toml().unwrap()),
+            Err(ConfigError::PersistentPeer(_))
+        ));
     }
 }

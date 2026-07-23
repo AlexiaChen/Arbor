@@ -261,3 +261,51 @@
 - **Evidence**: M6 `arbor-system` and `arbor-consensus` regression tests named in `doc/plan.md`.
 - **Confidence**: 10/10
 - **Action**: Before closing a milestone, map every test bullet to a named test and verify the fixture makes the claimed limit or failure path active.
+
+### L-033: [network] A libp2p transport identity is not an Arbor network handshake (2026-07-23)
+- **Issue**: M7 peers need to reject wrong-network and wrong-genesis connections before serving sync or consensus payloads.
+- **Trigger**: libp2p, identify, handshake, network ID, genesis, codec version
+- **Pattern**: Noise and signed peer IDs authenticate the transport key, while libp2p `identify` advertises transport protocols and addresses. Neither proves that the peer belongs to the same Arbor genesis. Every direct envelope therefore carries a canonical application handshake binding network ID, genesis hash, protocol/codec/direct versions, role, capabilities, and receive budget; expensive requests and gossip are handed to the application only after this boundary passes.
+- **Evidence**: `arbor-network::Handshake`, `NetworkService::handle_direct_event`, M7 two-listener tests.
+- **Confidence**: 10/10
+- **Action**: Keep peer identity separate from validator identity, reject any application identity mismatch locally, and never infer validator authority from a libp2p peer ID or advertised role.
+
+### L-034: [sync] Deterministic replay proves block validity, not production finality (2026-07-23)
+- **Issue**: M7 block sync starts before ADR-004 permits a production BFT engine or QC path.
+- **Trigger**: block sync, finality proof, SingleValidatorEngine, QC, empty proof
+- **Pattern**: The sync state machine checks transport bounds, sequential height, canonical block decoding, a pluggable finality verifier, full application replay, and only then the synchronous parity-db commit. The development adapter may explicitly accept an empty proof because its source uses immediate local finality, but this is not a QC and cannot be reused by M8 or production mode.
+- **Evidence**: `arbor-network::BlockSync`, `SingleValidatorEngine::import_development_finalized_block`, `m7_block_sync` integration test.
+- **Confidence**: 10/10
+- **Action**: Keep finality verification ahead of durable import, fail without moving the finalized marker, and replace the development verifier with the ADR-004-accepted validator-set/QC chain before production sync.
+
+### L-035: [supply-chain] Do not waive vulnerable discovery dependencies to complete a milestone checklist (2026-07-23)
+- **Issue**: rust-libp2p 0.56.0's `mdns` feature pulls `hickory-proto` 0.25.2, which fails `cargo deny` on RUSTSEC-2026-0118 and RUSTSEC-2026-0119; the compatible libp2p dependency range cannot use the fixed 0.26.1 release.
+- **Trigger**: mDNS, hickory-proto, cargo deny, vulnerability, libp2p
+- **Pattern**: A discovery convenience does not justify a vulnerability exception. Keep the vulnerable rust-libp2p feature disabled; a separately audited exact-pinned mDNS adapter may satisfy LAN discovery only if discovered peers still pass the full application handshake.
+- **Evidence**: exact-pinned libp2p and `mdns-sd` feature lists in `Cargo.toml`; `arbor-network::MdnsDiscovery`; `doc/protocol/dependencies.md`; cargo-deny advisory output.
+- **Confidence**: 10/10
+- **Action**: Keep libp2p's `mdns` feature disabled, do not add advisory ignores, and retain network/genesis authentication after any discovery mechanism.
+
+### L-036: [sync] A checkpoint is one durable multi-domain publication (2026-07-23)
+- **Issue**: State sync can reconstruct valid individual tries while still publishing an inconsistent global finalized view or advancing an idle domain to the consensus checkpoint height.
+- **Trigger**: checkpoint, state sync, domain heads root, idle domain, finalized marker
+- **Pattern**: Authenticate the complete sorted domain set, every descriptor/head proof, validator-set commitment, chunk hash, trie node, referenced code hash, and reconstructed state root before storage. Persist each domain at its own domain-block height while committing one global consensus-height marker in a single parity-db transaction; publish memory only after that transaction succeeds.
+- **Evidence**: `CheckpointManifest`, `SnapshotStaging`, `FinalizedChainState::from_checkpoint`, `SingleValidatorEngine::import_development_checkpoint`, multi-domain M7 snapshot/reopen test.
+- **Confidence**: 10/10
+- **Action**: Never treat per-domain import success or an in-memory reconstructed state as checkpoint completion.
+
+### L-037: [network] Sync sessions need serialization and a graceful serving tail (2026-07-23)
+- **Issue**: Duplicate authentication/status events can overlap downloads, while a producer that exits immediately after announcing a head may make its final block unservable.
+- **Trigger**: reconnect, duplicate handshake, status request, graceful shutdown, final announcement
+- **Pattern**: Emit application authentication once per connected session, keep one bounded sync action/download path per peer, clear it on timeout/disconnect, and allow a short network-drain interval after producer shutdown so already-announced finalized data remains requestable.
+- **Evidence**: `NetworkService` authentication/session state, `arbor-node::networked` action maps and drain loop, persistent listener restart test.
+- **Confidence**: 9/10
+- **Action**: Treat duplicate transport events as normal and make sync orchestration idempotent rather than spawning parallel imports.
+
+### L-038: [sync] Verify header ancestry and finality before downloading bodies (2026-07-23)
+- **Issue**: Whole-block-first sync spends bandwidth and decoding work before it can reject reordered, duplicated, or unauthenticated chains.
+- **Trigger**: header sync, finality proof, body download, reordered response
+- **Pattern**: First verify bounded canonical headers, exact sequential ancestry, the consensus adapter's finality proof, and the advertised remote tip. Request bodies only for those accepted heights, then require each decoded body to embed the exact verified header before deterministic replay and durable import.
+- **Evidence**: `HeaderSync`, `finalized_blocks_from_bodies`, `dropped_reordered_and_duplicate_headers_are_rejected_before_body_download`.
+- **Confidence**: 10/10
+- **Action**: Keep proof verification and ancestry checks ahead of body scheduling and keep application replay ahead of durable publication.

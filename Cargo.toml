@@ -15,7 +15,10 @@ alloy-primitives = { version = "=1.6.1", default-features = false, features = ["
 alloy-rlp = "=0.3.16"
 alloy-trie = { version = "=0.9.5", default-features = false, features = ["ethereum", "std"] }
 clap = { version = "4.5.41", features = ["derive"] }
+futures = "=0.3.31"
 k256 = { version = "=0.13.4", default-features = false, features = ["ecdsa", "std"] }
+libp2p = { version = "=0.56.0", default-features = false, features = ["cbor", "ed25519", "gossipsub", "identify", "kad", "macros", "noise", "ping", "request-response", "tcp", "tokio", "yamux"] }
+mdns-sd = { version = "=0.20.2", default-features = false }
 parity-db = "=0.5.5"
 revm = { version = "=41.0.0", default-features = false, features = ["std", "portable", "secp256k1"] }
 serde = { version = "1.0.219", features = ["derive"] }
